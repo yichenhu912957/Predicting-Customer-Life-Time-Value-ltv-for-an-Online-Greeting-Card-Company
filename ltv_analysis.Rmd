@@ -254,7 +254,8 @@ With these features, next start to analyze the following questions:
 - What is the life-time value of each customer?
 - How to segment customers so that we can identify sleeping customers?
 
-In the following sctions, we will walk through the features and predictive/descriptive methods we have fitted in each problem, compare the performance of various models we have tried, and summarize findings. Before fitting each model, we split our data into training set (80% of all customer data) and test set (the rest 20% of the customer data), train the models on training set and compare them by their performance on the test set.
+In the following sections, we will walk through the features and predictive/descriptive methods we have fitted in each problem, compare the performance of various models we have tried, and summarize findings. Before fitting each model, we split our data into training set (80% of all customer data) and test set (the rest 20% of the customer data), train the models on training set and compare them by their performance on the test set.
+
 
 ##### **Problem 1: Whether a customer will unsubscribe the service in near future?**
 This is a classification problem, therefore, we consider: Logistic Regression with lasso, Random Forest, Naive Bayes and K-Nearst Neighbour model.
@@ -271,7 +272,10 @@ Naive Bayes: Scales well to problems with large number of predictor. However, th
 
 K-NN Model: KNN is a model that is highly flexible, but hard to interpret
 
-To select an optimized model, use K-fold cross validation to determine the overall accuracy of the estimate of the train set. Afterwards, the interpretability and flexibility of the model was considered for the business scenario in which we are accurately trying to identify the customers who will cancel their subscription.
+To select an optimized model, the data scientists utilized K-fold cross validation to determine the overall accuracy of the estimate of the train set. Afterwards, the interpretability and flexibility of the model was considered for the business scenario in which we are accurately trying to identify the customers who will cancel their subscription.
+
+##### **Model 1: Logistic Regression with lasso**
+The advantages for regularized lasso is that it automatically select the best variables, but it has a hard time detecting interaction term in the model. It also makes the assumption that the model will be linear.
 
 ```{r cache=TRUE, warning=FALSE, fig.height=5, fig.width=8}
 
@@ -284,19 +288,112 @@ test.cancelled <- all.cancelled[-train.cancelled]
 cancelled.x <- model.matrix(cancelled~., customer.cancelled[train.cancelled,])[,-1]
 cancelled.y <- customer.cancelled[train.cancelled,]$cancelled
 cancelled.lasso <- glmnet(cancelled.x, cancelled.y, family = "binomial", alpha = 1)
+
+# Fit logictic regression with 10-fold cross-validation
 cancelled.lasso.cv <- cv.glmnet(cancelled.x, cancelled.y, family = "binomial", alpha = 1,
-                                type.measure = "class")
+                                type.measure = "class", nfolds = 10)
 plot(cancelled.lasso.cv)
 cancelled.lam.min = cancelled.lasso.cv$lambda.min # lambda value chosen by min CV error
 cancelled.lam.1se = cancelled.lasso.cv$lambda.1se # lambda value chosen by 1se rule of CV error
-
 
 ```
 
 From the plot above, we choose optimal $\lambda$ = `r round(cancelled.lam.1se,4)` using `1-SE rule`, and the optimal model selects `r cancelled.lasso.cv$nzero[which(cancelled.lasso.cv$lambda==cancelled.lam.1se)]` variables. The variables and their coefficients are in below table:
 
+```{r}
+coef.lasso.1se <- as.matrix(coef(cancelled.lasso, s = cancelled.lam.1se))
+coef.lasso.1se <- coef.lasso.1se[coef.lasso.1se != 0,]
+kable(coef.lasso.1se, digits = 3, col.names = "Coefficient")
+```
+
+Then we test the model on test data, and get confusion matrix as below.
+
+```{r cache=TRUE, warning=FALSE}
+# function that measure the confusion matrix
+classMetric <- function(conf.mat){
+  accuracy <- sum(diag(conf.mat)) / (sum(conf.mat[,1]) + sum(conf.mat[,2]))
+  sensitivity <- conf.mat[2,2] / sum(conf.mat[,2])
+  specificity <- conf.mat[1,1] / sum(conf.mat[,1])
+  ppv <- conf.mat[2,2] / sum(conf.mat[2,])
+  npv <- conf.mat[1,1] / sum(conf.mat[1,])
+  precision <- ppv
+  recall <- sensitivity
+  result <- c(accuracy,sensitivity,specificity,ppv,npv,precision,recall)
+  result <- data.frame(result)
+  rownames(result) <- c("accuracy","sensitivity","specificity","ppv","npv","precision","recall")
+  return(result)
+}
+```
+
+```{r}
+# Performance of Logistic Regression with lasso on test set
+cancelled.test.x <- model.matrix(cancelled~., customer.cancelled[test.cancelled,])[,-1]
+cancelled.lasso.prob <- predict(cancelled.lasso, newx = cancelled.test.x, s = cancelled.lam.1se, type = "response")
+cancelled.lasso.pred <- rep(0, length(cancelled.lasso.prob))
+cancelled.lasso.pred[cancelled.lasso.prob >= 0.5] <- 1
+
+# Confusion Matrix
+cancelled.lasso.test.matrix <- confusionMatrix(cancelled.lasso.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table 
+cancelled.lasso.test.matrix
+lasso.mis <- sum(cancelled.lasso.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
+
+```
+The misclassification rate on test data is `r round(100*lasso.mis,2)`%.
+
+```{r cache=TRUE, warning=FALSE}
+classMetric(cancelled.lasso.test.matrix)
+```
 
 
+##### **Model 2: Random Forests**
+Some of the advantages considered for this model are that it is a highly accurate learning algorithm and highly flexible. It also indicates variable importance. But the disadvantage is that it will be hard to interpret. Random forests provide an improvement over bagged trees by way of a small tweak that decorrelates the trees. We build a number of decision trees on bootstrapped training samples. But when building these decision trees, each time a split in a tree is considered, a random sample of m predictors is chosen as split candidates from the full set of p predictors. Fit random forests to the training data, and get the importance of different variables as below:
+
+```{r, cache=TRUE, fig.height = 10, fig.width = 12}
+# Model 2: Random Forest
+cancelled.rf <- randomForest(cancelled~., data = customer.cancelled[train.cancelled,])
+varImpPlot(cancelled.rf)
+```
+
+Then we test the random forests on test set, and get confusion matrix as below:
+
+```{r}
+# Performance of Random Forests on test set
+cancelled.rf.prob <- predict(cancelled.rf, newdata = customer.cancelled[test.cancelled,], type = "prob")[,"1"]
+cancelled.rf.pred <- rep(0, length(cancelled.rf.prob))
+cancelled.rf.pred[cancelled.rf.prob >= 0.5] <- 1
+cancelled.rf.test.matrix <- confusionMatrix(cancelled.rf.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table
+cancelled.rf.test.matrix
+rf.mis <- sum(cancelled.rf.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
+```
+
+The misclassification rate on test data is `r round(100*rf.mis,2)`%.
+
+```{r cache=TRUE, warning=FALSE}
+classMetric(cancelled.rf.test.matrix)
+```
+
+##### **Model 3: Naive Bayes**
+
+Naive Bayes classifiers are a family of simple probabilistic classifiers based on applying Bayes' theorem with strong independence assumptions between the features. Scales well to problems with large number of predictor. However, the downside with this approach is that all the inputs are independent in each class (can be a problem if the variables are collinear). Although our features may not be totally independent given the class value, Naive Bayes sometimes perform well on large feature space. Thus we decide to try it. We fit Naive Bayes to the training data, then test it on test set and get confusion matrix as below:
+
+```{r}
+
+# Model 3: Naive Bayes
+cancelled.nb <- NaiveBayes(cancelled~., data = customer.cancelled[train.cancelled,], usekernel = TRUE)
+
+# Performance of Naive Bayes on test set
+cancelled.nb.pred <- predict(cancelled.nb, newdata = customer.cancelled[test.cancelled,], type = "class")$class
+cancelled.nb.test.matrix <- confusionMatrix(cancelled.nb.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table
+cancelled.nb.test.matrix
+nb.mis <- sum(cancelled.nb.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
+
+```
+
+The misclassification rate on test data is `r round(100*nb.mis,2)`%.
+
+```{r cache=TRUE, warning=FALSE}
+classMetric(cancelled.nb.test.matrix)
+```
 
 
 
