@@ -1,0 +1,306 @@
+---
+title: "Customer Life Time Value Analysis"
+author: "Fan"
+date: "7/21/2019"
+output: html_document
+        toc: true
+        toc_depth: 3
+        theme: cerulean
+        highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+
+```{r cache=TRUE}
+options(scipen = 99)
+set.seed(42)
+
+# Load all required packages
+library(plyr)
+library(caret)
+library(e1071)
+library(glmnet)
+library(ggplot2)
+library(knitr)
+library(moments)
+library(data.table)
+library(rpart)
+library(partykit)
+library(randomForest)
+library(klaR)
+library(dendextend)
+library(colorspace)
+library(gplots)
+library(pROC)
+```
+
+```{r cache=TRUE}
+# Read in the customer data
+data.ltv <- read.csv("ltv.csv", sep = ",")
+```
+
+### Introduction
+
+
+This project is to help an online greeting card company to understand the life-time-value of their customers. The company want to further improve their revenue by identifying loyal customers and ways they can retain them. Also, the company want to identify inactive users from the active ones. To achieve this goal, it will need a customer segmentation scheme. Therefore, this project will solve the problems as folowwing:
+
+a). A model to predict whether a customer will cancel their subscription in the near future  
+b). A model to estimate the life-time-value for a customer  
+c). A customer segmentation scheme to identify inactive vs active users  
+
+The client provided `r format(length(customer$id), big.mark=",")` daily usage records of `r format(length(unique(customer$id)), big.mark=",")` customers from January 1st, 2011 to December 31st, 2014. The dataset includes several statistics of customers' behaviors when he/she visits the website as follows:  
+
+| Data Field | Description                                                                         | 
+|------------|-------------------------------------------------------------------------------------|
+| `id`       | A unique user identifier                                                            |
+| `status`   | Subscription status ‘0’- new, ‘1’- open, ‘2’- cancelation                           |
+| `gender`   | User gender ‘M’- male, ‘F’- female                                                  |
+| `date`     | Date of in which user ‘id’ logged into the site                                     |
+| `pages`    | Number of pages visted by user ‘id’ on date ‘date’                                  |
+| `onsite`   | Number of minutes spent on site by user ‘id’ on date ‘date’                         |
+| `entered`  | Flag indicating whether or not user entered the send order path on date ‘date’      |
+| `completed`| Flag indicating whether the user completed the order (sent an eCard)                |
+| `holiday`  | Flag indicating whether at least one completed order included a holiday themed card |
+
+### Methodology and Findings
+
+##### **Explore Data**
+
+```{r cache=TRUE}
+# Data structure
+str(data.ltv)
+summary(data.ltv)
+```
+After initial exploration of the data, it shows:
+
+1) No missing values(NA) present in the data
+
+2) No discrepancy in the collection of observations
+
+3) Number of females are way more than males
+
+Data requires no further cleaning.
+
+
+##### **Feature Engineering** 
+
+```{r cache=TRUE, warning=FALSE}
+# Feature Engineering
+stat_features <- ddply(data.ltv, .(id), summarise,
+      
+                # Generate 'cancelled' as predict variable
+                # For the customers whose status is '2 - cancelation', use 1 as 'cancelled' the others as '0 - not cancelled'
+                cancelled = factor(ifelse(max(status) == 2, 1, 0), levels = c(0, 1)),
+                
+                # Gender field
+                gender = unique(gender),
+                
+                # Calculate total number of logins over the whole customer life time
+                totalLoginNum = length(unique(date)),
+                
+                # Calculate the average, max, min, s.d and skewness
+                # for pages/onsite over the whole customer life time
+                avgPages = mean(pages),
+                maxPages = max(pages),
+                minPages = min(pages[status != 2]),
+                sdPages = sd(pages),
+                skewPages = skewness(pages),
+                avgOnsite = mean(onsite), 
+                maxOnsite = max(onsite), 
+                minOnsite = min(onsite[status != 2]),
+                avgOnsite = mean(onsite), 
+                maxOnsite = max(onsite), 
+                minOnsite = min(onsite[status != 2]),
+                
+                # Calculate the average, max, min, s.d. and skewness of time stay in one page
+                avgOnsitePageTime = mean(onsite/pages,na.rm = TRUE),
+                maxOnsitePageTime = max(onsite/pages,na.rm = TRUE),
+                minOnsitePageTime = min(onsite/pages,na.rm = TRUE),
+                sdOnsitePageTime = sd(onsite/pages,na.rm = TRUE),
+                skewOnsitePageTime = skewness(onsite/pages,na.rm = TRUE),
+                
+                # Calculate the average/total count of entered/completed for each customer
+                avgEntered = mean(entered), 
+                sumEntered = sum(entered),
+                avgCompleted = mean(completed), 
+                sumCompleted = sum(completed),
+                
+                # Calculate the ratio of completed over entered for each customer
+                cmplOverEtr = sum(completed)/sum(entered),
+                              
+                # For each customer, among all completed order, how many is associated with holiday
+                YesHoliday = sum(completed == 1 & holiday == 1),
+                NoHoliday = sum(completed == 1 & holiday == 0),
+                              
+                # Calculate the average conversion rate from pages to entered for each customer
+                conversion = mean(entered/pages, na.rm = TRUE)
+                )
+
+# Calculate min and max date of each customer
+# For customers who have cancelled, the max date is the cancelation date
+# For customers who havn't cancelled yet, the max date use the max date in data set which is 2014-12-31
+minDate <- ddply(data.ltv, .(id), summarise, minDate = min(as.Date(date)))[,"minDate"]
+maxDate <- ddply(data.ltv, .(id), summarise, maxDate = max(as.Date(date)))[,"maxDate"]
+maxDate[stat_features$cancelled == 0] <- as.Date("2014-12-31")
+months <- as.numeric(difftime(maxDate, minDate, units = "days")) / 30
+
+# Calculate the ltv of each customer as the total number of months after the status changing from
+# 0 to 1 since the subscription is $1 per month
+minDate.ltv <- ddply(data.ltv, .(id), summarise, minDate = min(as.Date(date[status != 0])))[,"minDate"]
+ltv <- 1 * as.numeric(difftime(maxDate, minDate.ltv, units = "days")) / 30
+
+# Average monthly login times
+avgLoginNum <- stat_features[, "totalLoginNum"] / months
+
+# Login times during the first month
+firstMonth <- data.frame(id = 1:10000, firstMonth = minDate + 30)
+firstMonthMerge <- merge(data.ltv[, c("id", "date")], firstMonth)
+firstMonthLoginNum <- count(firstMonthMerge[with(firstMonthMerge, as.Date(date) <= firstMonth),], "id")[,"freq"]
+
+# Login times during the last month
+lastMonth <- data.frame(id = 1:10000, lastMonth = maxDate - 30)
+lastMonthMerge <- merge(data.ltv[, c("id", "date")], lastMonth)
+lastMonthLoginNum <- with(lastMonthMerge, table(factor(id, levels = c(1:10000)), as.Date(date) >= lastMonth))[,"TRUE"]
+
+# Ratio of customer login times during first/last month
+firstMonthLoginRatio <- lastMonthLoginNum / firstMonthLoginNum
+
+# Customer login times during four quarters of the year
+quarter <- with(data.ltv, data.frame(id = id, quater = ceiling(as.numeric(substring(date, 6, 7)) / 3 )))
+quarterLoginNum <- with(quater, table(id = factor(id, levels = c(1:10000)), quater))
+colnames(quaterLoginNum) <- c("Q1","Q2","Q3","Q4")
+quarterLoginNum <- as.data.frame.matrix(quaterLoginNum)
+
+# Time difference between adjacent logins of each customer
+date.table <- with(data.ltv, data.table(group = id, value = date))
+setkey(date.table, group)
+dateDiff <- date.table[ , diff := c(NA, diff(value)), by = group]
+dateDiffStatsTable <- ddply(dateDiff, .(group), summarise,
+                            avgDateDiff = mean(diff, na.rm = TRUE), 
+                            maxDateDiff = max(diff, na.rm = TRUE),
+                            minDateDiff = min(diff, na.rm = TRUE), 
+                            sdDateDiff = sd(diff, na.rm = TRUE))
+
+# Problem 1 dataset
+customer.cancelled <- data.frame(stat_features,
+                                 firstMonthLoginNum,
+                                 lastMonthLoginNum,
+                                 firstMonthLoginRatio,
+                                 quarterLoginNum,
+                                 dateDiffStatsTable)
+
+# Eliminate "id" and "group" from features
+customer.cancelled <- customer.cancelled[,!(names(customer.cancelled) %in% c("id","group"))] 
+
+# Eliminate those records with NA values
+customer.cancelled[mapply(is.infinite, customer.cancelled)] <- NA
+customer.cancelled[mapply(is.nan, customer.cancelled)] <- NA
+customer.cancelled <- na.omit(customer.cancelled)
+
+```
+
+As the usage statistics data provided by client is at daily level, here first aggregate the data to customer level, and create more features that might help in exploring the life-time value of customers. When calculating time duration related features, we assume that the last registration date for those customers who have not cancelled their accounts are `12-31-2014`, as this is the last day of effective data range of our dataset.
+
+The description of each feature is as below:
+
+| Feature             | Description                                                                        
+|---------------------|--------------------------------------------------------------------------------------------------------
+| `gender`            | User gender 'M'- male, 'F'- female
+| `totalLoginNum`     | Total number of logins of the customer over the time the customer stays with the company
+| `avgPages`          | Average number of pages visited by the customer over the time the customer stays with the company
+| `maxPages`          | Maximum number of pages visited by the customer for a single login over the time the customer stays with the company
+| `minPages`          | Minimum number of pages visited by the customer for a single login over the time the customer stays with the company
+| `sdPages`           | Standard deviation of number of pages visited by the customer over the time the customer stays with the company
+| `skewPages`         | Skewness of number of pages visited by the customer over the time the customer stays with the company
+| `avgOnsite`         | Average number of minutes spent on site by the customer over the time the customer stays with the company
+| `maxOnsite`         | Maximum number of minutes spent on site by the customer for a single login over the time the customer stays with the company
+| `minOnsite`         | Minimum number of minutes spent on site by the customer for a single login over the time the customer stays with the company
+| `sdOnsite`          | Standard deviation of number of minutes spent on site by the customer over the time the customer stays with the company
+| `skewOnsite`        | Skewness of number of minutes spent on site by the customer over the time the customer stays with the company
+| `avgOnsitePageTime` | Average number of minutes the customer stays in one page
+| `maxOnsitePageTime` | Maximum number of minutes the customer stays in one page
+| `minOnsitePageTime` | Minimum number of minutes the customer stays in one page
+| `sdOnsitePageTime`  | Standard deviation of number of minutes the customer stays in one page
+| `skewOnsitePageTime`| Skewness of number of minutes the customer stays in one page
+| `avgEntered`        | Average number of entered orders of the customer
+| `sumEntered`        | Total number of entered orders of the customer
+| `avgCompleted`      | Average number of completed orders of the customer
+| `sumCompleted`      | Total number of completed orders of the customer
+| `cmplOverEtr`       | Ratio of total completed orders over total entered orders of the customer
+| `YesHoliday`        | Total number of completed orders on holiday 
+| `NoHoliday`         | Total number of completed orders that are not made on holiday 
+| `conversion`        | Average conversion rate from page to order entered page of the customer
+| `firstMonthLoginNum`| Number of login during the first month of the customer's subscription
+| `lastMonthLoginNum` | Number of login during the last month of the customer's subscription subscription, for customers who haven’t cancelled, their last month is December 2014
+| `oneMonthLoginRatio`| Ratio of firstMonthLoginNum over lastMonthLoginNum
+| `Q1`                | Number of login during the first quarter (January to March every year) of the customer's subscription
+| `Q2`                | Number of login during the second quarter (April to June every year) of the customer's subscription
+| `Q3`                | Number of login during the third quarter (July to September every year) of the customer's subscription
+| `Q4`                | Number of login during the last quarter (October to December every year) of the customer's subscription
+| `avgDateDiff`       | Average time difference between adjacent logins of the customer
+| `maxDateDiff`       | Maximum time difference between adjacent logins of the customer
+| `minDateDiff`       | Minimum time difference between adjacent logins of the customer
+| `sdDateDiff`        | Standard deviation of time differences between adjacent logins of the customer
+
+
+##### **Data Mining Methods and Findings** 
+
+With these features, next start to analyze the following questions:
+
+- Whether a customer will unsubscribe the service in near future?
+- What is the life-time value of each customer?
+- How to segment customers so that we can identify sleeping customers?
+
+In the following sctions, we will walk through the features and predictive/descriptive methods we have fitted in each problem, compare the performance of various models we have tried, and summarize findings. Before fitting each model, we split our data into training set (80% of all customer data) and test set (the rest 20% of the customer data), train the models on training set and compare them by their performance on the test set.
+
+##### **Problem 1: Whether a customer will unsubscribe the service in near future?**
+This is a classification problem, therefore, we consider: Logistic Regression with lasso, Random Forest, Naive Bayes and K-Nearst Neighbour model.
+
+These methods were considered for this scenario because it is a classic classification problem. There are advantages and disadvantages for all the mentioned models. We will briefly go over them before discussing the process of selecting the model.
+
+These are the following advantages and disadvantages considered for the following models:
+
+Random Forest: Some of the advantages considered for this model are that it is a highly accurate learning algorithm and highly flexible. It also indicates variable importance. But the disadvantage is that it will be hard to interpret.
+
+Regularized Lasso: The advantages for regularized lasso is that it automatically select the best variables, but it has a hard time detecting interaction term in the model. It also makes the assumption that the model will be linear.
+
+Naive Bayes: Scales well to problems with large number of predictor. However, the downside with this approach is that all the inputs are independent in each class (can be a problem if the variables are collinear).
+
+K-NN Model: KNN is a model that is highly flexible, but hard to interpret
+
+To select an optimized model, use K-fold cross validation to determine the overall accuracy of the estimate of the train set. Afterwards, the interpretability and flexibility of the model was considered for the business scenario in which we are accurately trying to identify the customers who will cancel their subscription.
+
+```{r cache=TRUE, warning=FALSE, fig.height=5, fig.width=8}
+
+# Split the data set into training and testing set
+all.cancelled <- 1:nrow(customer.cancelled)
+train.cancelled <- sample(all.cancelled, 0.8 * nrow(customer.cancelled))
+test.cancelled <- all.cancelled[-train.cancelled]
+
+# Model 1 -- Logistic regression with lasso
+cancelled.x <- model.matrix(cancelled~., customer.cancelled[train.cancelled,])[,-1]
+cancelled.y <- customer.cancelled[train.cancelled,]$cancelled
+cancelled.lasso <- glmnet(cancelled.x, cancelled.y, family = "binomial", alpha = 1)
+cancelled.lasso.cv <- cv.glmnet(cancelled.x, cancelled.y, family = "binomial", alpha = 1,
+                                type.measure = "class")
+plot(cancelled.lasso.cv)
+cancelled.lam.min = cancelled.lasso.cv$lambda.min # lambda value chosen by min CV error
+cancelled.lam.1se = cancelled.lasso.cv$lambda.1se # lambda value chosen by 1se rule of CV error
+
+
+```
+
+From the plot above, we choose optimal $\lambda$ = `r round(cancelled.lam.1se,4)` using `1-SE rule`, and the optimal model selects `r cancelled.lasso.cv$nzero[which(cancelled.lasso.cv$lambda==cancelled.lam.1se)]` variables. The variables and their coefficients are in below table:
+
+
+
+
+
+
+
+
+
+
