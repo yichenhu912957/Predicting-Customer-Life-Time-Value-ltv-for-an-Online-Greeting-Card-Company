@@ -2,7 +2,8 @@
 title: "Customer Life Time Value Analysis"
 author: "Fan"
 date: "7/21/2019"
-output: html_document
+output: 
+  html_document:
         toc: true
         toc_depth: 3
         theme: cerulean
@@ -51,7 +52,7 @@ a). A model to predict whether a customer will cancel their subscription in the 
 b). A model to estimate the life-time-value for a customer  
 c). A customer segmentation scheme to identify inactive vs active users  
 
-The client provided `r format(length(customer$id), big.mark=",")` daily usage records of `r format(length(unique(customer$id)), big.mark=",")` customers from January 1st, 2011 to December 31st, 2014. The dataset includes several statistics of customers' behaviors when he/she visits the website as follows:  
+The client provided `r format(length(data.ltv$id), big.mark=",")` daily usage records of `r format(length(unique(data.ltv$id)), big.mark=",")` customers from January 1st, 2011 to December 31st, 2014. The dataset includes several statistics of customers' behaviors when he/she visits the website as follows:  
 
 | Data Field | Description                                                                         | 
 |------------|-------------------------------------------------------------------------------------|
@@ -169,10 +170,10 @@ lastMonthLoginNum <- with(lastMonthMerge, table(factor(id, levels = c(1:10000)),
 firstMonthLoginRatio <- lastMonthLoginNum / firstMonthLoginNum
 
 # Customer login times during four quarters of the year
-quarter <- with(data.ltv, data.frame(id = id, quater = ceiling(as.numeric(substring(date, 6, 7)) / 3 )))
-quarterLoginNum <- with(quater, table(id = factor(id, levels = c(1:10000)), quater))
-colnames(quaterLoginNum) <- c("Q1","Q2","Q3","Q4")
-quarterLoginNum <- as.data.frame.matrix(quaterLoginNum)
+quarter <- with(data.ltv, data.frame(id = id, quarter = ceiling(as.numeric(substring(date, 6, 7)) / 3 )))
+quarterLoginNum <- with(quarter, table(id = factor(id, levels = c(1:10000)), quarter))
+colnames(quarterLoginNum) <- c("Q1","Q2","Q3","Q4")
+quarterLoginNum <- as.data.frame.matrix(quarterLoginNum)
 
 # Time difference between adjacent logins of each customer
 date.table <- with(data.ltv, data.table(group = id, value = date))
@@ -866,7 +867,6 @@ gplots::heatmap.2(as.matrix(customer.not.cancelled.cluster),
 ```
 
 From the heatmap, we can tell that customers with large avgDateDiff, sdDateDiff, maxDateDiff, and sleeping days, while low lastMonthLoginNum and oneMonthLoginRatio are clustered together in the cluster marked in blue. This result aligns with our understanding of customers: customers with low activity - which can be indicated by large date difference between logins and low last month login times compared to their login times in the first month, are highly likely to sleep. Therefore, our choices of features in clustering are actually associated with the sleeping status of a customer.
-
 
 
 
