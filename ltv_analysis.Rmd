@@ -734,6 +734,138 @@ By comparing the test set performance of these 3 models, we identify that Random
 Therefore, Random Forests performs best on predicting the life-time value for customers who have already cancelled their accounts as well. We can see that the Mean Absolute Error gets further reduced for customers who have already cancelled than all customers. Customers who have not cancelled but registered at a late time can have a very short life-time value per our calculation, thus eliminating them may make the prediction task easier and the Mean Absolute Error is even lower. Random Forests give us impressively low error in this task, which means that our client could use this approach to predict the life-time value of their future users and make forecast of their revenues more accurately.
 
 
+##### **Problem 3: How to segment customers so that we can identify sleeping customers?**
+
+In the third problem, we need to develop a customer segmentation scheme which can help our client identify those sleeping customers, who are no longer active but have not cancelled their account yet. This is an unsupervised learning task because there is no labels for this problem. So, clustering is a great method to shed light on this problem [Reference 7].  
+
+Before we cluster the customers, we first explore the data. After plotting the number of days between the last login date and 12-31-2014, the end date of this dataset, which is used as the last day of relationship with this company for customers who have not cancelled their accounts, we think 15 days could be a reasonable cutoff for deciding whether a customer is sleeping or not. If a customer has not logged in for more than 15 days, we will identify him/her as a sleeping customer. 
+
+```{r, cache=TRUE, warning=FALSE}
+
+# Problem 3 dataset
+
+# Merge all the data
+customer.all <- data.frame(ltv,
+                           stat_features,
+                           firstMonthLoginNum,
+                           lastMonthLoginNum,
+                           firstMonthLoginRatio,
+                           quarterLoginNum,
+                           dateDiffStatsTable)
+
+# Find out the last login date for customers who have not cancelled the subsription yet
+lastLoginDate <- ddply(data.ltv[data.ltv$status != 0,], .(id), summarise,
+                       lastLoginDate = max(as.Date(date)))
+customer.all <- merge(customer.all, lastLoginDate)
+customer.not.cancelled <- customer.all[customer.all$cancelled == 0, ]
+# eliminate "cancelled" and "group"
+customer.not.cancelled <- customer.not.cancelled[,!(names(customer.not.cancelled) %in% c("cancelled","group"))] 
+sleepDays <- as.numeric(difftime(as.Date("2014-12-31"), customer.not.cancelled$lastLoginDate, units = "days"))
+plot(sleepDays, ylim = c(0,50))
+axis(2, yaxp = c(0,50,10))
+abline(h = 15, col = "red")
+
+# Based on the plot, we choose 15 days as the cutoff for deciding whether a customer is sleeping or not
+# Then we create the class label for sleeping
+sleep <- factor(ifelse(sleepDays <= 15, 0, 1), levels = c(0,1))
+customer.not.cancelled <- data.frame(sleep, customer.not.cancelled)
+```
+
+We have `r nrow(customer.not.cancelled)` customers who have not cancelled their accounts, among whom `r sum(sleep==1)` are identified as sleeping customers.
+
+To determine the important features to be used in clustering the sleeping customers, we first fit Random Forests to the dataset as a classification task, and use the importance of variables ranked by Random Forests to identify crucial features that can tell us whether a customer is sleeping or not. The importance of features are as below:
+
+```{r, cache=TRUE, fig.height=10, fig.width=12}
+# Problem 3: Develop a customer segmentation scheme. Include in this scheme the identification of sleeping customers, those that are no longer active but have not canceled their account.
+
+# Step 1: fit a Random Forest on the entire data and find those important features
+# eliminate "id", "lastLoginDate" and "avgDateDiff" for classification
+customer.not.cancelled.noNA <- customer.not.cancelled[,!(names(customer.not.cancelled) %in% c("id","lastLoginDate","avgDateDiff"))] 
+# Below 3 lines of code are to eliminate the NA, NAN and infinate values from data, and are applied to every dataset used in model fitting afterwards, these codes are with reference to Reference 3
+customer.not.cancelled.noNA[mapply(is.infinite, customer.not.cancelled.noNA)] <- NA
+customer.not.cancelled.noNA[mapply(is.nan, customer.not.cancelled.noNA)] <- NA
+customer.not.cancelled.noNA <- na.omit(customer.not.cancelled.noNA)
+customer.not.cancelled.rf <- randomForest(sleep~., data = customer.not.cancelled.noNA)
+varImpPlot(customer.not.cancelled.rf)
+# importance(customer.not.cancelled.rf)[order(-customer.not.cancelled.rf$importance),]
+```
+
+From the importance rank shown above, we choose oneMonthLoginRatio, lastMonthLoginNum, sdDateDiff, avgDateDiff, maxDateDiff and ltv (customer life-time value calculated in Problem 2) as highly relevant features to use in clustering. Then we also conduct a feature cluster and see whether there are other features that are highly correlated with the number of days each customer is sleeping.
+
+```{r, cache=TRUE, fig.height=10, fig.width=12}
+# Then we do a feature cluster and see what features are highly correlated with sleepDays
+customer.not.cancelled.features <- data.frame(customer.not.cancelled, sleepDays)
+# eliminate "sleep", "id", "gender" and "lastLoginDate"
+customer.not.cancelled.features <- customer.not.cancelled.features[,!(names(customer.not.cancelled) %in% c("id","lastLoginDate","gender"))] 
+customer.not.cancelled.features <- customer.not.cancelled.features[,-1]
+customer.not.cancelled.features[mapply(is.infinite, customer.not.cancelled.features)] <- NA
+customer.not.cancelled.features[mapply(is.nan, customer.not.cancelled.features)] <- NA
+customer.not.cancelled.features <- na.omit(customer.not.cancelled.features)
+feature.matrix <- as.matrix(customer.not.cancelled.features)
+feature.cor <- cor(feature.matrix)
+feature.dissimilarity <- 1 - abs(feature.cor)
+feature.distance <- as.dist(feature.dissimilarity)
+feature.hc.complete <- hclust(feature.distance, method = "complete")
+plot(feature.hc.complete, main = "Feature Cluster", xlab = "", sub = "", cex = .9)
+abline(h= 0.4, col = "red")
+```
+
+From the dendrogram above, we plot a horizontal red line at correlation=0.6, and we find that customers' sleeping days is not really correlated with other features. Finally, we cluster the customers with lastMonthLoginNum, oneMonthLoginRatio, avgDateDiff, sdDateDiff, maxDateDiff, ltv, and sleepDays using Hierarchical Clustering. We scale all the features used in clustering. We are inspired by Tal Galili [Reference 2] who developed a hierarchical cluster analysis on Iris Dataset and develop below heatmap for clustering:
+
+```{r}
+customer.not.cancelled.cluster <- scale(customer.not.cancelled.features[,c("lastMonthLoginNum","firstMonthLoginRatio","avgDateDiff","sdDateDiff","maxDateDiff","ltv","sleepDays")])
+customer.not.cancelled.dist <- dist(customer.not.cancelled.cluster)
+customer.not.cancelled.hc <- hclust(customer.not.cancelled.dist, method = "complete")
+customer.cluster <- cutree(customer.not.cancelled.hc, k = 8)
+# table(customer.cluster, customer.not.cancelled.noNA$sleep)
+
+isSleep <- rev(levels(customer.not.cancelled.noNA$sleep))
+dend <- as.dendrogram(customer.not.cancelled.hc)
+dend <- rotate(dend, 1:nrow(customer.not.cancelled.cluster))
+dend <- color_branches(dend, k = 8)
+# Manually match the labels, as much as possible, to the real classification of the customers:
+labels_colors(dend) <-
+   rainbow_hcl(8)[sort_levels_values(
+      as.numeric(customer.not.cancelled.noNA$sleep)[order.dendrogram(dend)]
+   )]
+# We shall add the flower type to the labels:
+labels(dend) <- paste(as.character(customer.not.cancelled.noNA$sleep)[order.dendrogram(dend)],
+                           "(",labels(dend),")",
+                           sep = "")
+# We hang the dendrogram a bit:
+dend <- hang.dendrogram(dend,hang_height = 0.1)
+# reduce the size of the labels:
+# dend <- assign_values_to_leaves_nodePar(dend, 0.5, "lab.cex")
+dend <- set(dend, "labels_cex", 0.5)
+# And plot:
+#par(mar = c(3,3,3,7))
+# plot(dend,
+#      main = "Clustered Customers
+#      (the labels give the true customer sleep label)",
+#      horiz =  TRUE,  nodePar = list(cex = .007))
+# legend("topleft", legend = isSleep, fill = rainbow_hcl(8))
+
+some_col_func <- function(n) rev(colorspace::heat_hcl(n, c = c(80, 30), l = c(30, 90), power = c(1/5, 1.5)))
+
+# scaled_iris2 <- iris2 %>% as.matrix %>% scale
+
+gplots::heatmap.2(as.matrix(customer.not.cancelled.cluster),
+          main = "Heatmap for Customer Segmentation",
+          srtCol = 20,
+          dendrogram = "row",
+          Rowv = dend,
+          Colv = "NA", # this to make sure the columns are not ordered
+          trace = "none",
+          margins = c(5,0.1),
+          key.xlab = "Cm",
+          denscol = "grey",
+          density.info = "density",
+          RowSideColors = rev(labels_colors(dend)), # to add nice colored strips
+          col = some_col_func
+         )
+```
+
+From the heatmap, we can tell that customers with large avgDateDiff, sdDateDiff, maxDateDiff, and sleeping days, while low lastMonthLoginNum and oneMonthLoginRatio are clustered together in the cluster marked in blue. This result aligns with our understanding of customers: customers with low activity - which can be indicated by large date difference between logins and low last month login times compared to their login times in the first month, are highly likely to sleep. Therefore, our choices of features in clustering are actually associated with the sleeping status of a customer.
 
 
 
