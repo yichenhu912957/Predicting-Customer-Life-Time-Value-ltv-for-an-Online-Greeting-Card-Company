@@ -443,6 +443,299 @@ plot(rf.roc, add = TRUE, col = "green")
 
 ```
 
+From the ROC curves of Logistic Regression with lasso (black curve), KNN (steel blue curve), and Random Forests (green), we can also tell that Logistic Regression with lasso performs best on predicting whether a customer will unsubscribe the service in near future. Compared with the prevalence of cancelled customers in our training dataset, `r round(100*sum(customer.cancelled$cancelled[train.cancelled]==1)/length(train.cancelled),2)`%, the `r round(100 - 100*lasso.mis,2)`% accuracy rate that Logistic Regression with lasso has achieved is outstanding, thus we can apply this model to future users and make strategies to activate them if we predict that they will cancel their account.
+
+##### **Problem 2: What is the life-time value of each customer?**
+
+In problem 2, we estimate the life-time value for the customers, which means the total revenue earned by the company over the course of their relationship with the customer. Therefore, this task is a regression problem as the output is numerical value. We decided to analyze this task on two different group of people: all customers, and only the customers who have already cancelled their accounts. Here try three different models - Linear Regression with lasso, Regression Tree, and Random Forest. We are using 37 features this time - 36 features listed in Feature Engineering and whether the customer has cancelled the account or not. We calculate the ‘ltv’ as the response for this regression problem, which is the real life-time value of the customers - for those who have not cancelled their accounts, we calculate their ltv by `12-31-2014` - the end date of the dataset. When comparing the performance of different classifiers, we use Mean Absolute Error as our metrics, as it can directly tell us how far away are our predictions from the true values.
+
+##### **All Customers**
+
+##### **Model 1: Linear Regression with lasso**
+
+Just like Model 1 in Problem 1, lasso automatically does feature selection when fitting a regularized linear regression to predict ltv. We choose the $\lambda$ value using cross-validation, and the CV error plot is as below:
+
+```{r, cache=TRUE, warning=FALSE, fig.height = 5, fig.width = 8}
+
+# Problem 2 dataset
+# The entire dataset
+customer.ltv <- data.frame(ltv,
+                           stat_features,
+                           firstMonthLoginNum,
+                           lastMonthLoginNum,
+                           firstMonthLoginRatio,
+                           quarterLoginNum,
+                           dateDiffStatsTable)
+
+# Eliminate "id" and "group" from features
+customer.ltv <- customer.ltv[,!(names(customer.ltv) %in% c("id","group"))] 
+
+# Observations with only cancelled customers
+customer.ltv.cancelled <- customer.ltv[customer.ltv$cancelled == 1,]
+customer.ltv.cancelled <- customer.ltv.cancelled[,!(names(customer.ltv.cancelled) %in% c("cancelled"))]
+
+# Eliminate those records with NA values
+customer.ltv[mapply(is.infinite, customer.ltv)] <- NA
+customer.ltv[mapply(is.nan, customer.ltv)] <- NA
+customer.ltv <- na.omit(customer.ltv)
+customer.ltv.cancelled[mapply(is.infinite, customer.ltv.cancelled)] <- NA
+customer.ltv.cancelled[mapply(is.nan, customer.ltv.cancelled)] <- NA
+customer.ltv.cancelled <- na.omit(customer.ltv.cancelled)
+
+# dimension of dataset
+# dim(customer.ltv)
+# dim(customer.ltv.cancelled)
+```
+
+```{r, cache=TRUE, warning=FALSE, fig.height = 5, fig.width = 8}
+# Problem 2: Develop a model for estimating the ltv of a customer. Characterize your model performance.
+
+# Entire Dataset
+# Split the whole data set into train (80%) and test (20%) set
+set.seed(42) # so that the split is reproducible
+all.ltv <- 1:nrow(customer.ltv)
+train.ltv <- sample(all.ltv, 0.8*nrow(customer.ltv))
+test.ltv <- all.ltv[-train.ltv]
+
+# Model 1: Linear regression with lasso
+ltv.x <- model.matrix(ltv~., customer.ltv[train.ltv,])[,-1]
+# 37 features
+# dim(ltv.x) 
+ltv.y <- customer.ltv[train.ltv,]$ltv
+ltv.lasso <- glmnet(ltv.x, ltv.y, alpha = 1)
+# Use MAE as error measure per professor's advice
+ltv.lasso.cv <- cv.glmnet(ltv.x, ltv.y, alpha = 1, type.measure = "mae") 
+plot(ltv.lasso.cv)
+ltv.lam.min = ltv.lasso.cv$lambda.min # lambda value chosen by min CV error
+
+ltv.lam.1se = ltv.lasso.cv$lambda.1se # lambda value chosen by 1se rule of CV error
+# coef(ltv.lasso, s=ltv.lam.1se)
+```
+
+From the plot above, we choose optimal $\lambda$ = `r ltv.lam.1se` using 1-SE rule, and the optimal model selects `r ltv.lasso.cv$nzero[which(ltv.lasso.cv$lambda==ltv.lam.1se)]` variables. The variables and their coefficients are in below table:
+
+```{r}
+coef.ltv.lasso.1se <- as.matrix(coef(ltv.lasso, s = ltv.lam.1se))
+coef.ltv.lasso.1se <- coef.ltv.lasso.1se[coef.ltv.lasso.1se != 0,]
+kable(coef.ltv.lasso.1se, digits = 3, col.names = "Coefficient")
+
+# Performance of Linear Regression with lasso on test set
+ltv.test.x <- model.matrix(ltv~., customer.ltv[test.ltv,])[,-1]
+ltv.lasso.pred <- predict(ltv.lasso, newx = ltv.test.x, s = ltv.lam.1se, type = "response")
+lasso.mae <- mean(abs(customer.ltv[test.ltv,"ltv"] - ltv.lasso.pred)) # MAE
+```
+
+Then we test the model on test data, and the Mean Absolute Value is `r round(lasso.mae,2)`.
+
+##### **Model 2: Regression Tree**
+
+Trees are highly interpretable, thus we also try to fit the regression tree on the training dataset for this regression task. We choose the optimal tree size using cross-validation, and the CV error plot is as below:
+
+```{r, fig.height = 5, fig.width = 8}
+# Model 2: Decision tree
+
+# Fit a single tree using rpart
+ltv.tree <- rpart(ltv~., data = customer.ltv[train.ltv,])
+# Plot the CV error curve for the tree
+plotcp(ltv.tree)
+
+# Identify the value of the complexity parameter that produces the lowest CV error
+ltv.cp.min <- ltv.tree$cptable[which.min(ltv.tree$cptable[,"xerror"]),"CP"]
+ltv.cp.min.idx <- which.min(ltv.tree$cptable[,"xerror"])
+# CV-minimizing tree size
+# ltv.tree$cptable[ltv.cp.min.idx,"nsplit"] 
+
+# Prune the tree using the complexity parameter cp minimizing the CV error
+ltv.tree.prune.min <- prune(ltv.tree, cp = ltv.cp.min)
+ltv.party.prune.min <- as.party(ltv.tree.prune.min)
+# plot(ltv.party.prune.min, gp=gpar(fontsize=10))
+
+# Identify the value of the complexity parameter that produces the 1se CV error
+ltv.error.1se <- ltv.tree$cptable[ltv.cp.min.idx,"xerror"] + ltv.tree$cptable[ltv.cp.min.idx,"xstd"] 
+ltv.cp.vals <- ltv.tree$cptable[which(ltv.tree$cptable[,"xerror"] < ltv.error.1se), "CP"]
+ltv.cp.1se <- max(ltv.cp.vals)
+# CV-1se tree size
+# ltv.tree$cptable[ltv.tree$cptable[,"CP"]==ltv.cp.1se,"nsplit"]
+```
+
+From the plot above, we get optimal tree size = `r ltv.tree$cptable[ltv.tree$cptable[,"CP"]==ltv.cp.1se,"nsplit"]` using `1-SE rule`. We prune the tree using complexity parameter chosen by `1-SE rule`, and the optimal tree is as below:
+
+```{r, fig.height = 8, fig.width = 12}
+# Prune the tree using the complexity parameter cp using the 1se CV error
+ltv.tree.prune.1se <- prune(ltv.tree, cp = ltv.cp.1se) # Optimal tree
+ltv.party.prune.1se <- as.party(ltv.tree.prune.1se)
+plot(ltv.party.prune.1se, gp = gpar(fontsize = 10))
+
+# CV minimizing rule choose tree size 8
+# CV 1se rule choose the tree size 7
+# CV error for a single tree
+# printcp(ltv.tree)
+
+# Using 1se rule, the optimal tree size is 7
+
+# Performance of Regression Tree on test set
+ltv.tree.pred <- predict(ltv.tree.prune.1se, newdata = customer.ltv[test.ltv,])
+tree.mae <- mean(abs(customer.ltv[test.ltv,"ltv"] - ltv.tree.pred)) # MAE
+```
+
+Then we test the model on test data, and the Mean Absolute Value is `r round(tree.mae,2)`.
+
+##### **Model 3: Random Forests**
+
+We fit Random Forests on training data for this regression task, and get the importance of different variables as below:
+
+```{r, fig.height = 10, fig.width = 12}
+# Model 3: Random Forest
+ltv.rf <- randomForest(ltv~., data = customer.ltv[train.ltv,])
+varImpPlot(ltv.rf)
+
+# Performance of Random Forests on test set
+ltv.rf.pred <- predict(ltv.rf, newdata = customer.ltv[test.ltv,])
+rf.mae <- mean(abs(customer.ltv[test.ltv,"ltv"] - ltv.rf.pred)) # MAE
+```
+
+Then we test the model on test data, and the Mean Absolute Value is `r round(rf.mae,2)`.
+
+By comparing the test set performance of these 3 models, we identify that Random Forests perform the best. Below is the table comparing the Mean Absolute Error of 3 models, among which Random Forests generates the lowest Mean Absolute Error.
+
+| Model                            | Mean Absolute Error     | 
+|----------------------------------|-------------------------|
+| `Linear Regression with lasso`   | `r round(lasso.mae,2)`  |
+| `Classification Tree`            | `r round(tree.mae,2)`   |
+| `Random Forests`                 | `r round(rf.mae,2)`     | 
+
+Therefore, Random Forests performs best on predicting the life-time value for all customers.
+
+```{r}
+# Observations with only cancelled customers
+# Split the whole data set into train (80%) and test (20%) set
+set.seed(42) # so that the split is reproducible
+all.ltv.cancelled <- 1:nrow(customer.ltv.cancelled)
+train.ltv.cancelled <- sample(all.ltv.cancelled, 0.8*nrow(customer.ltv.cancelled))
+test.ltv.cancelled <- all.ltv.cancelled[-train.ltv.cancelled]
+```
+
+##### **Customers Who Have Already Cancelled Their Accounts**
+
+There are `r format(nrow(customer.ltv.cancelled), big.mark=",")` customers who have already cancelled their accounts. We use exactly the same three models as we do for all customers.
+
+##### **Model 1: Linear Regression with lasso**
+
+We choose the $\lambda$ value for lasso using cross-validation, and the CV error plot is as below:
+
+```{r, cache=TRUE, fig.height = 5, fig.width = 8}
+# Model 1: Linear regression with lasso
+ltv.cancelled.x <- model.matrix(ltv~., customer.ltv.cancelled[train.ltv.cancelled,])[,-1]
+# 36 features
+# dim(ltv.cancelled.x) 
+ltv.cancelled.y <- customer.ltv.cancelled[train.ltv.cancelled,]$ltv
+ltv.cancelled.lasso <- glmnet(ltv.cancelled.x, ltv.cancelled.y, alpha = 1)
+ltv.cancelled.lasso.cv <- cv.glmnet(ltv.cancelled.x, ltv.cancelled.y, alpha = 1, type.measure = "mae")
+plot(ltv.cancelled.lasso.cv)
+ltv.cancelled.lam.min = ltv.cancelled.lasso.cv$lambda.min # lambda value chosen by min CV error
+# ltv.cancelled.lasso.cv$nzero[which(ltv.cancelled.lasso.cv$lambda==ltv.cancelled.lam.min)]
+# coef(ltv.cancelled.lasso, s=ltv.cancelled.lam.min)
+
+ltv.cancelled.lam.1se = ltv.cancelled.lasso.cv$lambda.1se # lambda value chosen by 1se rule of CV error
+# ltv.cancelled.lasso.cv$nzero[which(ltv.cancelled.lasso.cv$lambda==ltv.cancelled.lam.1se)]
+# coef(ltv.cancelled.lasso, s=ltv.cancelled.lam.1se)
+```
+
+From the plot above, we choose optimal $\lambda$ = `r ltv.cancelled.lam.1se` using 1-SE rule, and the optimal model selects `r ltv.cancelled.lasso.cv$nzero[which(ltv.cancelled.lasso.cv$lambda==ltv.cancelled.lam.1se)]` variables. The variables and their coefficients are in below table:
+
+```{r}
+coef.ltv.cancelled.lasso.1se <- as.matrix(coef(ltv.cancelled.lasso, s = ltv.cancelled.lam.1se))
+coef.ltv.cancelled.lasso.1se <- coef.ltv.cancelled.lasso.1se[coef.ltv.cancelled.lasso.1se != 0,]
+kable(coef.ltv.cancelled.lasso.1se, digits = 3, col.names = "Coefficient")
+
+# Performance of Linear Regression with lasso on test set
+ltv.cancelled.test.x <- model.matrix(ltv~., customer.ltv.cancelled[test.ltv.cancelled,])[,-1]
+ltv.cancelled.lasso.pred <- predict(ltv.cancelled.lasso, newx=ltv.cancelled.test.x, s = ltv.cancelled.lam.1se, type = "response")
+cancelled.lasso.mae <- mean(abs(customer.ltv.cancelled[test.ltv.cancelled,"ltv"] - ltv.cancelled.lasso.pred)) # MAE
+```
+
+Then we test the model on test data, and the Mean Absolute Value is `r round(cancelled.lasso.mae,2)`.
+
+##### **Model 2: Regression Tree**
+
+We also try to fit the regression tree on the training dataset for customers who have cancelled their accounts. We choose the optimal tree size using cross-validation, and the CV error plot is as below:
+
+```{r, fig.height = 5, fig.width = 8}
+# Model 2: Regression tree
+
+# Fit a single tree using rpart
+ltv.cancelled.tree <- rpart(ltv~., data = customer.ltv.cancelled[train.ltv.cancelled,])
+# Plot the CV error curve for the tree
+plotcp(ltv.cancelled.tree)
+
+# Identify the value of the complexity parameter that produces the lowest CV error
+ltv.cancelled.cp.min <- ltv.cancelled.tree$cptable[which.min(ltv.cancelled.tree$cptable[,"xerror"]),"CP"]
+ltv.cancelled.cp.min.idx <- which.min(ltv.cancelled.tree$cptable[,"xerror"])
+# ltv.cancelled.tree$cptable[ltv.cancelled.cp.min.idx,"nsplit"] # CV-minimizing tree size
+
+# Prune the tree using the complexity parameter cp minimizing the CV error
+ltv.cancelled.tree.prune.min <- prune(ltv.cancelled.tree, cp = ltv.cancelled.cp.min)
+ltv.cancelled.party.prune.min <- as.party(ltv.cancelled.tree.prune.min)
+# plot(ltv.cancelled.party.prune.min, gp=gpar(fontsize=10))
+
+# Identify the value of the complexity parameter that produces the 1se CV error
+ltv.cancelled.error.1se <- ltv.cancelled.tree$cptable[ltv.cancelled.cp.min.idx,"xerror"] + 
+                           ltv.cancelled.tree$cptable[ltv.cancelled.cp.min.idx,"xstd"] 
+ltv.cancelled.cp.vals <- ltv.cancelled.tree$cptable[which(ltv.cancelled.tree$cptable[,"xerror"] < 
+                                                          ltv.cancelled.error.1se), "CP"]
+ltv.cancelled.cp.1se <- max(ltv.cancelled.cp.vals)
+# ltv.cancelled.tree$cptable[ltv.cancelled.tree$cptable[,"CP"]==ltv.cancelled.cp.1se,"nsplit"] # CV-1se tree size
+```
+
+From the plot above, we get optimal tree size = `r ltv.cancelled.tree$cptable[ltv.cancelled.tree$cptable[,"CP"]==ltv.cancelled.cp.1se,"nsplit"]` using `1-SE rule`. We prune the tree using complexity parameter chosen by `1-SE rule`, and the optimal tree is as below:
+
+```{r, fig.height = 8, fig.width = 12}
+# Prune the tree using the complexity parameter cp using the 1se CV error
+ltv.cancelled.tree.prune.1se <- prune(ltv.cancelled.tree, cp = ltv.cancelled.cp.1se) # Optimal tree
+ltv.cancelled.party.prune.1se <- as.party(ltv.cancelled.tree.prune.1se)
+plot(ltv.cancelled.party.prune.1se, gp = gpar(fontsize = 10))
+
+# CV minimizing rule and CV 1se rule both choose tree size 8
+# CV error for a single tree
+# printcp(ltv.cancelled.tree)
+
+# Using 1se rule, the optimal tree size is 8
+# Performance of Regression Tree on test set
+ltv.cancelled.tree.pred <- predict(ltv.cancelled.tree.prune.1se, newdata = customer.ltv.cancelled[test.ltv.cancelled,])
+cancelled.tree.mae <- mean(abs(customer.ltv.cancelled[test.ltv.cancelled,"ltv"] - ltv.cancelled.tree.pred)) # MAE
+```
+
+Then we test the model on test data, and the Mean Absolute Value is `r round(cancelled.tree.mae,2)`.
+
+##### **Model 3: Random Forests**
+
+We fit Random Forests on training data for customers who have cancelled their accounts, and get the importance of different variables as below:
+
+```{r, cache=TRUE, fig.height = 10, fig.width = 12}
+# Model 3: Random Forests
+ltv.cancelled.rf <- randomForest(ltv~., data = customer.ltv.cancelled[train.ltv.cancelled,])
+varImpPlot(ltv.cancelled.rf)
+
+# Performance of Random Forests on test set
+ltv.cancelled.rf.pred <- predict(ltv.cancelled.rf, newdata = customer.ltv.cancelled[test.ltv.cancelled,])
+cancelled.rf.mae <- mean(abs(customer.ltv.cancelled[test.ltv.cancelled,"ltv"] - ltv.cancelled.rf.pred)) # MSE
+```
+
+Then we test the model on test data, and the Mean Absolute Value is `r round(cancelled.rf.mae,2)`.
+
+By comparing the test set performance of these 3 models, we identify that Random Forests perform the best. Below is the table comparing the Mean Absolute Error of 3 models, among which Random Forests generates the lowest Mean Absolute Error.
+
+| Model                            | Mean Absolute Error               | 
+|----------------------------------|-----------------------------------|
+| `Linear Regression with lasso`   | `r round(cancelled.lasso.mae,2)`  |
+| `Classification Tree`            | `r round(cancelled.tree.mae,2)`   |
+| `Random Forests`                 | `r round(cancelled.rf.mae,2)`     | 
+
+Therefore, Random Forests performs best on predicting the life-time value for customers who have already cancelled their accounts as well. We can see that the Mean Absolute Error gets further reduced for customers who have already cancelled than all customers. Customers who have not cancelled but registered at a late time can have a very short life-time value per our calculation, thus eliminating them may make the prediction task easier and the Mean Absolute Error is even lower. Random Forests give us impressively low error in this task, which means that our client could use this approach to predict the life-time value of their future users and make forecast of their revenues more accurately.
+
+
+
+
 
 
 
