@@ -395,6 +395,57 @@ The misclassification rate on test data is `r round(100*nb.mis,2)`%.
 classMetric(cancelled.nb.test.matrix)
 ```
 
+##### **Model 4: K Nearst Neighbour**
+
+KNN is a model that is highly flexible, but hard to interpret
+
+```{r, cache=TRUE, fig.height = 10, fig.width = 12}
+# Model 4: K Nearst Neighbour
+train_control <- trainControl(method = "cv", number = 10)
+cancelled.knn <- train(cancelled~., data = customer.cancelled[train.cancelled,], trControl = train_control, method = "knn")
+```
+
+Then we test the KNN on test set, and get confusion matrix as below:
+
+```{r}
+# Performance of Random Forests on test set
+cancelled.knn.prob <- predict(cancelled.knn, newdata = customer.cancelled[test.cancelled,], type = "prob")[,"1"]
+cancelled.knn.pred <- rep(0, length(cancelled.rf.prob))
+cancelled.knn.pred[cancelled.knn.prob >= 0.5] <- 1
+cancelled.knn.test.matrix <- confusionMatrix(cancelled.knn.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table
+cancelled.knn.test.matrix
+knn.mis <- sum(cancelled.knn.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
+```
+
+The misclassification rate on test data is `r round(100*knn.mis,2)`%.
+
+```{r cache=TRUE, warning=FALSE}
+classMetric(cancelled.knn.test.matrix)
+```
+
+
+By comparing the test set performance of these 4 models, we identify that Logistic Regression with lasso ($\lambda$ value chosen by 1-SE rule) performs the best. Below is the table comparing the misclassification rate of 4 models, among which Logistic Regression with lasso generates the lowest misclassification rate.
+
+| Model                            | Misclassification Rate       | 
+|----------------------------------|------------------------------|
+| `Logistic Regression with lasso` | `r round(100*lasso.mis,2)`%  |
+| `Random Forests`                 | `r round(100*rf.mis,2)`%     | 
+| `Naive Bayes`                    | `r round(100*nb.mis,2)`%     |
+| `KNN`                            | `r round(100*knn.mis,2)`%   |
+```{r, , fig.height = 5, fig.width = 8}
+lasso.roc <- roc(customer.cancelled[test.cancelled,"cancelled"], cancelled.lasso.prob[,1])
+knn.roc <- roc(customer.cancelled[test.cancelled,"cancelled"], cancelled.knn.prob)
+rf.roc <- roc(customer.cancelled[test.cancelled,"cancelled"], cancelled.rf.prob)
+
+plot(lasso.roc, main = "ROC")
+plot(knn.roc, add = TRUE, col = "steelblue")
+plot(rf.roc, add = TRUE, col = "green")
+
+```
+
+
+
+
 
 
 
