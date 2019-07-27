@@ -1,5 +1,7 @@
 # Predicting-Customer-Life-Time-Value-ltv-for-an-Online-Greeting-Card-Company
 
+.rmd file has been knit and to view the html please go to the following link: http://htmlpreview.github.io/?https://github.com/JcFreya/Predicting-Customer-Life-Time-Value-ltv-for-an-Online-Greeting-Card-Company/blob/master/ltv_analysis.html
+
 ## Project description
 
 The client is an online greeting card company. The company offers monthly subscriptions at a rate of $1 per month for access to their eCard website. The client is interested in understanding the __life-time value (ltv) of their customers__.
