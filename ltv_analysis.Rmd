@@ -1,63 +1,21 @@
 ---
-title: "Customer Life Time Value Analysis"
-author: "Fan"
-date: "7/21/2019"
-output: 
-  html_document:
-        toc: true
-        toc_depth: 3
-        theme: cerulean
-        highlight: tango
+title: "ltvProject"
+author: "Blake Tian"
+output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-```
 
+## R Markdown
 
-```{r cache=TRUE}
-options(scipen = 99)
-set.seed(42)
-
-# Load all required packages
-library(plyr)
-library(caret)
-library(e1071)
-library(glmnet)
-library(ggplot2)
-library(knitr)
-library(moments)
-library(data.table)
-library(rpart)
-library(partykit)
-library(randomForest)
-library(klaR)
-library(dendextend)
-library(colorspace)
-library(gplots)
-library(pROC)
-```
-
-```{r cache=TRUE}
-# Read in the customer data
-data.ltv <- read.csv("ltv.csv", sep = ",")
-```
-
-### Introduction
-
-
-This project is to help an online greeting card company to understand the life-time-value of their customers. The company want to further improve their revenue by identifying loyal customers and ways they can retain them. Also, the company want to identify inactive users from the active ones. To achieve this goal, it will need a customer segmentation scheme. Therefore, this project will solve the problems as folowwing:
-
-a). A model to predict whether a customer will cancel their subscription in the near future  
-b). A model to estimate the life-time-value for a customer  
-c). A customer segmentation scheme to identify inactive vs active users  
-
-The client provided `r format(length(data.ltv$id), big.mark=",")` daily usage records of `r format(length(unique(data.ltv$id)), big.mark=",")` customers from January 1st, 2011 to December 31st, 2014. The dataset includes several statistics of customers' behaviors when he/she visits the website as follows:  
+Our client is an online greeting card company. The company offers monthly subscriptions at a rate of $1 per month for access to their eCard website. The client is interested in understanding the life-time value (ltv) of their customers.
+The life-time value of a customer is defined as the total revenue earned by the company over the course of their relationship with the customer.
+The enclosed (synthetic) data represent usage statistics for 10,000 customers. Usage is summarized at a daily level and covers a period of 4 years from 2011-01-01 to 2014-12-31.
+The following is a description of each field captured in the enclosed data set containing a total of 10,000 customers.
 
 | Data Field | Description                                                                         | 
 |------------|-------------------------------------------------------------------------------------|
 | `id`       | A unique user identifier                                                            |
-| `status`   | Subscription status ‘0’- new, ‘1’- open, ‘2’- cancelation                           |
+| `status`   | Subscription status ‘0’- new, ‘1’- open, ‘2’- cancelation event                     |
 | `gender`   | User gender ‘M’- male, ‘F’- female                                                  |
 | `date`     | Date of in which user ‘id’ logged into the site                                     |
 | `pages`    | Number of pages visted by user ‘id’ on date ‘date’                                  |
@@ -66,814 +24,400 @@ The client provided `r format(length(data.ltv$id), big.mark=",")` daily usage re
 | `completed`| Flag indicating whether the user completed the order (sent an eCard)                |
 | `holiday`  | Flag indicating whether at least one completed order included a holiday themed card |
 
-### Methodology and Findings
+We must preprocess the data to determine the following: 
 
-##### **Explore Data**
-
-```{r cache=TRUE}
-# Data structure
-str(data.ltv)
-summary(data.ltv)
-```
-After initial exploration of the data, it shows:
-
-1) No missing values(NA) present in the data
-
-2) No discrepancy in the collection of observations
-
-3) Number of females are way more than males
-
-Data requires no further cleaning.
+| Data Field | Description                                                                         | 
+|------------|-------------------------------------------------------------------------------------|
+| `lifespan` | The lifespan of each customer in days, for cancelled customers= cancelDate-openDate,|
+|            | for open customers=maxDate-openDate+1/(cancelled customers/total customers)         |
 
 
-##### **Feature Engineering** 
-
-```{r cache=TRUE, warning=FALSE}
-# Feature Engineering
-stat_features <- ddply(data.ltv, .(id), summarise,
-      
-                # Generate 'cancelled' as predict variable
-                # For the customers whose status is '2 - cancelation', use 1 as 'cancelled' the others as '0 - not cancelled'
-                cancelled = factor(ifelse(max(status) == 2, 1, 0), levels = c(0, 1)),
-                
-                # Gender field
-                gender = unique(gender),
-                
-                # Calculate total number of logins over the whole customer life time
-                totalLoginNum = length(unique(date)),
-                
-                # Calculate the average, max, min, s.d and skewness
-                # for pages/onsite over the whole customer life time
-                avgPages = mean(pages),
-                maxPages = max(pages),
-                minPages = min(pages[status != 2]),
-                sdPages = sd(pages),
-                skewPages = skewness(pages),
-                avgOnsite = mean(onsite), 
-                maxOnsite = max(onsite), 
-                minOnsite = min(onsite[status != 2]),
-                avgOnsite = mean(onsite), 
-                maxOnsite = max(onsite), 
-                minOnsite = min(onsite[status != 2]),
-                
-                # Calculate the average, max, min, s.d. and skewness of time stay in one page
-                avgOnsitePageTime = mean(onsite/pages,na.rm = TRUE),
-                maxOnsitePageTime = max(onsite/pages,na.rm = TRUE),
-                minOnsitePageTime = min(onsite/pages,na.rm = TRUE),
-                sdOnsitePageTime = sd(onsite/pages,na.rm = TRUE),
-                skewOnsitePageTime = skewness(onsite/pages,na.rm = TRUE),
-                
-                # Calculate the average/total count of entered/completed for each customer
-                avgEntered = mean(entered), 
-                sumEntered = sum(entered),
-                avgCompleted = mean(completed), 
-                sumCompleted = sum(completed),
-                
-                # Calculate the ratio of completed over entered for each customer
-                cmplOverEtr = sum(completed)/sum(entered),
-                              
-                # For each customer, among all completed order, how many is associated with holiday
-                YesHoliday = sum(completed == 1 & holiday == 1),
-                NoHoliday = sum(completed == 1 & holiday == 0),
-                              
-                # Calculate the average conversion rate from pages to entered for each customer
-                conversion = mean(entered/pages, na.rm = TRUE)
-                )
-
-# Calculate min and max date of each customer
-# For customers who have cancelled, the max date is the cancelation date
-# For customers who havn't cancelled yet, the max date use the max date in data set which is 2014-12-31
-minDate <- ddply(data.ltv, .(id), summarise, minDate = min(as.Date(date)))[,"minDate"]
-maxDate <- ddply(data.ltv, .(id), summarise, maxDate = max(as.Date(date)))[,"maxDate"]
-maxDate[stat_features$cancelled == 0] <- as.Date("2014-12-31")
-months <- as.numeric(difftime(maxDate, minDate, units = "days")) / 30
-
-# Calculate the ltv of each customer as the total number of months after the status changing from
-# 0 to 1 since the subscription is $1 per month
-minDate.ltv <- ddply(data.ltv, .(id), summarise, minDate = min(as.Date(date[status != 0])))[,"minDate"]
-ltv <- 1 * as.numeric(difftime(maxDate, minDate.ltv, units = "days")) / 30
-
-# Average monthly login times
-avgLoginNum <- stat_features[, "totalLoginNum"] / months
-
-# Login times during the first month
-firstMonth <- data.frame(id = 1:10000, firstMonth = minDate + 30)
-firstMonthMerge <- merge(data.ltv[, c("id", "date")], firstMonth)
-firstMonthLoginNum <- count(firstMonthMerge[with(firstMonthMerge, as.Date(date) <= firstMonth),], "id")[,"freq"]
-
-# Login times during the last month
-lastMonth <- data.frame(id = 1:10000, lastMonth = maxDate - 30)
-lastMonthMerge <- merge(data.ltv[, c("id", "date")], lastMonth)
-lastMonthLoginNum <- with(lastMonthMerge, table(factor(id, levels = c(1:10000)), as.Date(date) >= lastMonth))[,"TRUE"]
-
-# Ratio of customer login times during first/last month
-firstMonthLoginRatio <- lastMonthLoginNum / firstMonthLoginNum
-
-# Customer login times during four quarters of the year
-quarter <- with(data.ltv, data.frame(id = id, quarter = ceiling(as.numeric(substring(date, 6, 7)) / 3 )))
-quarterLoginNum <- with(quarter, table(id = factor(id, levels = c(1:10000)), quarter))
-colnames(quarterLoginNum) <- c("Q1","Q2","Q3","Q4")
-quarterLoginNum <- as.data.frame.matrix(quarterLoginNum)
-
-# Time difference between adjacent logins of each customer
-date.table <- with(data.ltv, data.table(group = id, value = date))
-setkey(date.table, group)
-dateDiff <- date.table[ , diff := c(NA, diff(value)), by = group]
-dateDiffStatsTable <- ddply(dateDiff, .(group), summarise,
-                            avgDateDiff = mean(diff, na.rm = TRUE), 
-                            maxDateDiff = max(diff, na.rm = TRUE),
-                            minDateDiff = min(diff, na.rm = TRUE), 
-                            sdDateDiff = sd(diff, na.rm = TRUE))
-
-# Problem 1 dataset
-customer.cancelled <- data.frame(stat_features,
-                                 firstMonthLoginNum,
-                                 lastMonthLoginNum,
-                                 firstMonthLoginRatio,
-                                 quarterLoginNum,
-                                 dateDiffStatsTable)
-
-# Eliminate "id" and "group" from features
-customer.cancelled <- customer.cancelled[,!(names(customer.cancelled) %in% c("id","group"))] 
-
-# Eliminate those records with NA values
-customer.cancelled[mapply(is.infinite, customer.cancelled)] <- NA
-customer.cancelled[mapply(is.nan, customer.cancelled)] <- NA
-customer.cancelled <- na.omit(customer.cancelled)
-
+```{r, message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(ISLR)
+library(partykit)
+library(caret)
+library(rpart)
+library(randomForest)
+library(pROC)
+library(readxl)
+library(binaryLogic)
+library(dplyr)
+library(class)
+library(DMwR)
+library(nnet)
+library(e1071)
+library(ranger)
+library(glmnet)
 ```
 
-As the usage statistics data provided by client is at daily level, here first aggregate the data to customer level, and create more features that might help in exploring the life-time value of customers. When calculating time duration related features, we assume that the last registration date for those customers who have not cancelled their accounts are `12-31-2014`, as this is the last day of effective data range of our dataset.
-
-The description of each feature is as below:
-
-| Feature             | Description                                                                        
-|---------------------|--------------------------------------------------------------------------------------------------------
-| `gender`            | User gender 'M'- male, 'F'- female
-| `totalLoginNum`     | Total number of logins of the customer over the time the customer stays with the company
-| `avgPages`          | Average number of pages visited by the customer over the time the customer stays with the company
-| `maxPages`          | Maximum number of pages visited by the customer for a single login over the time the customer stays with the company
-| `minPages`          | Minimum number of pages visited by the customer for a single login over the time the customer stays with the company
-| `sdPages`           | Standard deviation of number of pages visited by the customer over the time the customer stays with the company
-| `skewPages`         | Skewness of number of pages visited by the customer over the time the customer stays with the company
-| `avgOnsite`         | Average number of minutes spent on site by the customer over the time the customer stays with the company
-| `maxOnsite`         | Maximum number of minutes spent on site by the customer for a single login over the time the customer stays with the company
-| `minOnsite`         | Minimum number of minutes spent on site by the customer for a single login over the time the customer stays with the company
-| `sdOnsite`          | Standard deviation of number of minutes spent on site by the customer over the time the customer stays with the company
-| `skewOnsite`        | Skewness of number of minutes spent on site by the customer over the time the customer stays with the company
-| `avgOnsitePageTime` | Average number of minutes the customer stays in one page
-| `maxOnsitePageTime` | Maximum number of minutes the customer stays in one page
-| `minOnsitePageTime` | Minimum number of minutes the customer stays in one page
-| `sdOnsitePageTime`  | Standard deviation of number of minutes the customer stays in one page
-| `skewOnsitePageTime`| Skewness of number of minutes the customer stays in one page
-| `avgEntered`        | Average number of entered orders of the customer
-| `sumEntered`        | Total number of entered orders of the customer
-| `avgCompleted`      | Average number of completed orders of the customer
-| `sumCompleted`      | Total number of completed orders of the customer
-| `cmplOverEtr`       | Ratio of total completed orders over total entered orders of the customer
-| `YesHoliday`        | Total number of completed orders on holiday 
-| `NoHoliday`         | Total number of completed orders that are not made on holiday 
-| `conversion`        | Average conversion rate from page to order entered page of the customer
-| `firstMonthLoginNum`| Number of login during the first month of the customer's subscription
-| `lastMonthLoginNum` | Number of login during the last month of the customer's subscription subscription, for customers who haven’t cancelled, their last month is December 2014
-| `oneMonthLoginRatio`| Ratio of firstMonthLoginNum over lastMonthLoginNum
-| `Q1`                | Number of login during the first quarter (January to March every year) of the customer's subscription
-| `Q2`                | Number of login during the second quarter (April to June every year) of the customer's subscription
-| `Q3`                | Number of login during the third quarter (July to September every year) of the customer's subscription
-| `Q4`                | Number of login during the last quarter (October to December every year) of the customer's subscription
-| `avgDateDiff`       | Average time difference between adjacent logins of the customer
-| `maxDateDiff`       | Maximum time difference between adjacent logins of the customer
-| `minDateDiff`       | Minimum time difference between adjacent logins of the customer
-| `sdDateDiff`        | Standard deviation of time differences between adjacent logins of the customer
-
-
-##### **Data Mining Methods and Findings** 
-
-With these features, next start to analyze the following questions:
-
-- Whether a customer will unsubscribe the service in near future?
-- What is the life-time value of each customer?
-- How to segment customers so that we can identify sleeping customers?
-
-In the following sections, we will walk through the features and predictive/descriptive methods we have fitted in each problem, compare the performance of various models we have tried, and summarize findings. Before fitting each model, we split our data into training set (80% of all customer data) and test set (the rest 20% of the customer data), train the models on training set and compare them by their performance on the test set.
-
-
-##### **Problem 1: Whether a customer will unsubscribe the service in near future?**
-This is a classification problem, therefore, we consider: Logistic Regression with lasso, Random Forest, Naive Bayes and K-Nearst Neighbour model.
-
-These methods were considered for this scenario because it is a classic classification problem. There are advantages and disadvantages for all the mentioned models. We will briefly go over them before discussing the process of selecting the model.
-
-These are the following advantages and disadvantages considered for the following models:
-
-Random Forest: Some of the advantages considered for this model are that it is a highly accurate learning algorithm and highly flexible. It also indicates variable importance. But the disadvantage is that it will be hard to interpret.
-
-Regularized Lasso: The advantages for regularized lasso is that it automatically select the best variables, but it has a hard time detecting interaction term in the model. It also makes the assumption that the model will be linear.
-
-Naive Bayes: Scales well to problems with large number of predictor. However, the downside with this approach is that all the inputs are independent in each class (can be a problem if the variables are collinear).
-
-K-NN Model: KNN is a model that is highly flexible, but hard to interpret
-
-To select an optimized model, the data scientists utilized K-fold cross validation to determine the overall accuracy of the estimate of the train set. Afterwards, the interpretability and flexibility of the model was considered for the business scenario in which we are accurately trying to identify the customers who will cancel their subscription.
-
-##### **Model 1: Logistic Regression with lasso**
-The advantages for regularized lasso is that it automatically select the best variables, but it has a hard time detecting interaction term in the model. It also makes the assumption that the model will be linear.
-
-```{r cache=TRUE, warning=FALSE, fig.height=5, fig.width=8}
-
-# Split the data set into training and testing set
-all.cancelled <- 1:nrow(customer.cancelled)
-train.cancelled <- sample(all.cancelled, 0.8 * nrow(customer.cancelled))
-test.cancelled <- all.cancelled[-train.cancelled]
-
-# Model 1 -- Logistic regression with lasso
-cancelled.x <- model.matrix(cancelled~., customer.cancelled[train.cancelled,])[,-1]
-cancelled.y <- customer.cancelled[train.cancelled,]$cancelled
-cancelled.lasso <- glmnet(cancelled.x, cancelled.y, family = "binomial", alpha = 1)
-
-# Fit logictic regression with 10-fold cross-validation
-cancelled.lasso.cv <- cv.glmnet(cancelled.x, cancelled.y, family = "binomial", alpha = 1,
-                                type.measure = "class", nfolds = 10)
-plot(cancelled.lasso.cv)
-cancelled.lam.min = cancelled.lasso.cv$lambda.min # lambda value chosen by min CV error
-cancelled.lam.1se = cancelled.lasso.cv$lambda.1se # lambda value chosen by 1se rule of CV error
-
+```{r, cache = TRUE}
+# Importing teh data directly from Excel
+customer.data <- read_excel("C:/Users/Maggie/Downloads/ltv Dataset.xlsx")
 ```
 
-From the plot above, we choose optimal $\lambda$ = `r round(cancelled.lam.1se,4)` using `1-SE rule`, and the optimal model selects `r cancelled.lasso.cv$nzero[which(cancelled.lasso.cv$lambda==cancelled.lam.1se)]` variables. The variables and their coefficients are in below table:
-
-```{r}
-coef.lasso.1se <- as.matrix(coef(cancelled.lasso, s = cancelled.lam.1se))
-coef.lasso.1se <- coef.lasso.1se[coef.lasso.1se != 0,]
-kable(coef.lasso.1se, digits = 3, col.names = "Coefficient")
-```
-
-Then we test the model on test data, and get confusion matrix as below.
-
-```{r cache=TRUE, warning=FALSE}
-# function that measure the confusion matrix
-classMetric <- function(conf.mat){
-  accuracy <- sum(diag(conf.mat)) / (sum(conf.mat[,1]) + sum(conf.mat[,2]))
-  sensitivity <- conf.mat[2,2] / sum(conf.mat[,2])
-  specificity <- conf.mat[1,1] / sum(conf.mat[,1])
-  ppv <- conf.mat[2,2] / sum(conf.mat[2,])
-  npv <- conf.mat[1,1] / sum(conf.mat[1,])
-  precision <- ppv
-  recall <- sensitivity
-  result <- c(accuracy,sensitivity,specificity,ppv,npv,precision,recall)
-  result <- data.frame(result)
-  rownames(result) <- c("accuracy","sensitivity","specificity","ppv","npv","precision","recall")
-  return(result)
-}
+```{r, cache = TRUE}
+# Transform the data to teh desired format
+customer.data <- transform(
+  customer.data,
+  id=as.integer(id),
+  status=as.integer(status),
+  gender=as.factor(gender),
+  date=as.Date(date),
+  pages=as.integer(pages),
+  onsite=as.integer(onsite),
+  entered=as.integer(entered),
+  completed=as.integer(completed),
+  holiday=as.integer(holiday)
+)
 ```
 
 ```{r}
-# Performance of Logistic Regression with lasso on test set
-cancelled.test.x <- model.matrix(cancelled~., customer.cancelled[test.cancelled,])[,-1]
-cancelled.lasso.prob <- predict(cancelled.lasso, newx = cancelled.test.x, s = cancelled.lam.1se, type = "response")
-cancelled.lasso.pred <- rep(0, length(cancelled.lasso.prob))
-cancelled.lasso.pred[cancelled.lasso.prob >= 0.5] <- 1
-
-# Confusion Matrix
-cancelled.lasso.test.matrix <- confusionMatrix(cancelled.lasso.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table 
-cancelled.lasso.test.matrix
-lasso.mis <- sum(cancelled.lasso.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
-
+#processing the date
+customer.data$date <- as.Date(customer.data$date,'%m/%d/%Y')
+customer.data$month <- months(customer.data$date)
+customer.data$year <- format(customer.data$date,format = '%Y')
 ```
-The misclassification rate on test data is `r round(100*lasso.mis,2)`%.
-
-```{r cache=TRUE, warning=FALSE}
-classMetric(cancelled.lasso.test.matrix)
-```
-
-
-##### **Model 2: Random Forests**
-Some of the advantages considered for this model are that it is a highly accurate learning algorithm and highly flexible. It also indicates variable importance. But the disadvantage is that it will be hard to interpret. Random forests provide an improvement over bagged trees by way of a small tweak that decorrelates the trees. We build a number of decision trees on bootstrapped training samples. But when building these decision trees, each time a split in a tree is considered, a random sample of m predictors is chosen as split candidates from the full set of p predictors. Fit random forests to the training data, and get the importance of different variables as below:
-
-```{r, cache=TRUE, fig.height = 10, fig.width = 12}
-# Model 2: Random Forest
-cancelled.rf <- randomForest(cancelled~., data = customer.cancelled[train.cancelled,])
-varImpPlot(cancelled.rf)
-```
-
-Then we test the random forests on test set, and get confusion matrix as below:
 
 ```{r}
-# Performance of Random Forests on test set
-cancelled.rf.prob <- predict(cancelled.rf, newdata = customer.cancelled[test.cancelled,], type = "prob")[,"1"]
-cancelled.rf.pred <- rep(0, length(cancelled.rf.prob))
-cancelled.rf.pred[cancelled.rf.prob >= 0.5] <- 1
-cancelled.rf.test.matrix <- confusionMatrix(cancelled.rf.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table
-cancelled.rf.test.matrix
-rf.mis <- sum(cancelled.rf.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
+#calculate the average value
+ltv.pages <- aggregate( pages ~ id+ month + year, customer.data, mean)
+ltv.onsite <- aggregate( onsite ~ id + month + year, customer.data, mean)
+#merger the table
+ltv.m1 <- merge(x = ltv.pages, y = ltv.onsite, by = c('id','month','year'), all.x = TRUE)
 ```
-
-The misclassification rate on test data is `r round(100*rf.mis,2)`%.
-
-```{r cache=TRUE, warning=FALSE}
-classMetric(cancelled.rf.test.matrix)
-```
-
-##### **Model 3: Naive Bayes**
-
-Naive Bayes classifiers are a family of simple probabilistic classifiers based on applying Bayes' theorem with strong independence assumptions between the features. Scales well to problems with large number of predictor. However, the downside with this approach is that all the inputs are independent in each class (can be a problem if the variables are collinear). Although our features may not be totally independent given the class value, Naive Bayes sometimes perform well on large feature space. Thus we decide to try it. We fit Naive Bayes to the training data, then test it on test set and get confusion matrix as below:
 
 ```{r}
-
-# Model 3: Naive Bayes
-cancelled.nb <- NaiveBayes(cancelled~., data = customer.cancelled[train.cancelled,], usekernel = TRUE)
-
-# Performance of Naive Bayes on test set
-cancelled.nb.pred <- predict(cancelled.nb, newdata = customer.cancelled[test.cancelled,], type = "class")$class
-cancelled.nb.test.matrix <- confusionMatrix(cancelled.nb.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table
-cancelled.nb.test.matrix
-nb.mis <- sum(cancelled.nb.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
-
+#sort the dataframe and export it
+ltv.m1 <- ltv.m1[order(ltv.m1$id),]
+ltv.m1
+write.csv(ltv.m1,'ltv_modelOne.csv',row.names = FALSE)
 ```
 
-The misclassification rate on test data is `r round(100*nb.mis,2)`%.
-
-```{r cache=TRUE, warning=FALSE}
-classMetric(cancelled.nb.test.matrix)
+```{r, cache=TRUE}
+#convert the data from numeric to date type (duplicate) 
+#customer.data$date <- as.Date(customer.data$date, origin = "1899-12-30")
+#Calculate the customer lifespan 
+#first group the data by ID to find the max and min date for a given customer
+#along with the latest status 
+customer.lifespan <- customer.data[, c("id", "date", "status")] %>% group_by(id)
+customer.lifespan <-customer.lifespan %>% mutate(maxDate = max(date)) 
+customer.lifespan <-customer.lifespan %>% mutate(status = max(status)) 
+customer.lifespan <- customer.lifespan %>% filter(date == min(date)) %>% distinct(id, .keep_all = TRUE) %>% rename(minDate = date)
+#Subtract the maxDate and minDate to determine the number of days of subscription
+customer.lifespan$subDays <- as.integer(difftime(customer.lifespan$maxDate, customer.lifespan$minDate, units = "days"))
+#Determine the observed lifespan factor to be added
+lifespanFraction <- 1/(with(1, sum(customer.data$status == 2))/10000)
+#calculate the lifespan for the customers
+customer.lifespan$lifespan <- customer.lifespan$subDays
+#customer.lifespan$lifespan <- ifelse(customer.lifespan$status == 2, customer.lifespan$subDays, customer.lifespan$subDays + lifespanFraction)
+#add this data to the main dataset 
+customer.data$lifespan <- customer.lifespan$lifespan[match(customer.data$id,customer.lifespan$id)]
 ```
 
-##### **Model 4: K Nearst Neighbour**
-
-KNN is a model that is highly flexible, but hard to interpret
-
-```{r, cache=TRUE, fig.height = 10, fig.width = 12}
-# Model 4: K Nearst Neighbour
-train_control <- trainControl(method = "cv", number = 10)
-cancelled.knn <- train(cancelled~., data = customer.cancelled[train.cancelled,], trControl = train_control, method = "knn")
+```{r, cache = TRUE}
+# Add 2 columns in the dataframe representing completed/holiday and onsite/entered
+ltv_afterProcess <- transform(
+  customer.data,
+  CompletedVSHoliday=as.integer(entered)/as.integer(holiday),
+  OnsiteVSEntered=as.integer(onsite)/as.integer(entered)
+)
 ```
 
-Then we test the KNN on test set, and get confusion matrix as below:
+```{r, cache = TRUE}
+# calculate the ratio between sum of all entered and sum of all completed
+SumEnteredVSCompleted <- sum(ltv_afterProcess$entered)/sum(ltv_afterProcess$completed)
+SumEnteredVSCompleted
+```
+
+```{r, cache = TRUE}
+# create a new dataframe representing teh aggregated summation of each variable per customer
+aggregatedCustomerSums <- aggregate(cbind(PagesSum=ltv_afterProcess$pages, OnsiteSum=ltv_afterProcess$onsite, EnteredSum=ltv_afterProcess$entered, CompletedSum=ltv_afterProcess$completed, HolidaySum=ltv_afterProcess$holiday), by=list(Customerid=ltv_afterProcess$id), FUN=sum)
+aggregatedCustomerSums<-merge(x = aggregatedCustomerSums, y = customer.data, intersect(names(aggregatedCustomerSums), names(customer.data)), by.x = "Customerid", by.y = "id", all.x=TRUE)[,c(names(aggregatedCustomerSums), "gender")]%>% distinct(Customerid, .keep_all=TRUE)
+aggregatedCustomerSums <- transform(
+  aggregatedCustomerSums,
+  gender = as.factor(gender),
+  status = customer.lifespan$status,
+  lifespan = customer.lifespan$lifespan,
+  decisiveratio = CompletedSum / EnteredSum
+)
+aggregatedCustomerSums <- rename(aggregatedCustomerSums, id = Customerid, pages = PagesSum, onsite = OnsiteSum, entered = EnteredSum, completed = CompletedSum, holiday = HolidaySum)
+```
+
+
+## 1.	Develop an attrition model, to predict whether a customer will cancel their subscription in the near future. Characterize your model performance.
+
+- First Method: predict lifespan of different segments custoemr
 
 ```{r}
-# Performance of Random Forests on test set
-cancelled.knn.prob <- predict(cancelled.knn, newdata = customer.cancelled[test.cancelled,], type = "prob")[,"1"]
-cancelled.knn.pred <- rep(0, length(cancelled.rf.prob))
-cancelled.knn.pred[cancelled.knn.prob >= 0.5] <- 1
-cancelled.knn.test.matrix <- confusionMatrix(cancelled.knn.pred, customer.cancelled[test.cancelled,"cancelled"], dnn = list("Prediction", "Observation"))$table
-cancelled.knn.test.matrix
-knn.mis <- sum(cancelled.knn.pred != customer.cancelled[test.cancelled,"cancelled"])/length(customer.cancelled[test.cancelled,"cancelled"])
 ```
 
-The misclassification rate on test data is `r round(100*knn.mis,2)`%.
+- Second Method: predict the specific lifespan of each custoemr
 
-```{r cache=TRUE, warning=FALSE}
-classMetric(cancelled.knn.test.matrix)
+```{r}
+# splitting prediction training and testing dataset
+customer.canceled.train <- aggregatedCustomerSums[aggregatedCustomerSums$status == "2",]
+customer.continuing.test <- aggregatedCustomerSums[aggregatedCustomerSums$status != "2",]
+
+# process prediction variables
+drops <- c("id","status","decisiveratio")
+customer.canceled.train <- customer.canceled.train[ , !(names(customer.canceled.train) %in% drops)]
+customer.continuing.test <- customer.continuing.test[ , !(names(customer.continuing.test) %in% drops)]
 ```
 
+```{r}
+# linear lasso model
 
-By comparing the test set performance of these 4 models, we identify that Logistic Regression with lasso ($\lambda$ value chosen by 1-SE rule) performs the best. Below is the table comparing the misclassification rate of 4 models, among which Logistic Regression with lasso generates the lowest misclassification rate.
-
-| Model                            | Misclassification Rate       | 
-|----------------------------------|------------------------------|
-| `Logistic Regression with lasso` | `r round(100*lasso.mis,2)`%  |
-| `Random Forests`                 | `r round(100*rf.mis,2)`%     | 
-| `Naive Bayes`                    | `r round(100*nb.mis,2)`%     |
-| `KNN`                            | `r round(100*knn.mis,2)`%   |
-```{r, , fig.height = 5, fig.width = 8}
-lasso.roc <- roc(customer.cancelled[test.cancelled,"cancelled"], cancelled.lasso.prob[,1])
-knn.roc <- roc(customer.cancelled[test.cancelled,"cancelled"], cancelled.knn.prob)
-rf.roc <- roc(customer.cancelled[test.cancelled,"cancelled"], cancelled.rf.prob)
-
-plot(lasso.roc, main = "ROC")
-plot(knn.roc, add = TRUE, col = "steelblue")
-plot(rf.roc, add = TRUE, col = "green")
-
-```
-
-From the ROC curves of Logistic Regression with lasso (black curve), KNN (steel blue curve), and Random Forests (green), we can also tell that Logistic Regression with lasso performs best on predicting whether a customer will unsubscribe the service in near future. Compared with the prevalence of cancelled customers in our training dataset, `r round(100*sum(customer.cancelled$cancelled[train.cancelled]==1)/length(train.cancelled),2)`%, the `r round(100 - 100*lasso.mis,2)`% accuracy rate that Logistic Regression with lasso has achieved is outstanding, thus we can apply this model to future users and make strategies to activate them if we predict that they will cancel their account.
-
-##### **Problem 2: What is the life-time value of each customer?**
-
-In problem 2, we estimate the life-time value for the customers, which means the total revenue earned by the company over the course of their relationship with the customer. Therefore, this task is a regression problem as the output is numerical value. We decided to analyze this task on two different group of people: all customers, and only the customers who have already cancelled their accounts. Here try three different models - Linear Regression with lasso, Regression Tree, and Random Forest. We are using 37 features this time - 36 features listed in Feature Engineering and whether the customer has cancelled the account or not. We calculate the ‘ltv’ as the response for this regression problem, which is the real life-time value of the customers - for those who have not cancelled their accounts, we calculate their ltv by `12-31-2014` - the end date of the dataset. When comparing the performance of different classifiers, we use Mean Absolute Error as our metrics, as it can directly tell us how far away are our predictions from the true values.
-
-##### **All Customers**
-
-##### **Model 1: Linear Regression with lasso**
-
-Just like Model 1 in Problem 1, lasso automatically does feature selection when fitting a regularized linear regression to predict ltv. We choose the $\lambda$ value using cross-validation, and the CV error plot is as below:
-
-```{r, cache=TRUE, warning=FALSE, fig.height = 5, fig.width = 8}
-
-# Problem 2 dataset
-# The entire dataset
-customer.ltv <- data.frame(ltv,
-                           stat_features,
-                           firstMonthLoginNum,
-                           lastMonthLoginNum,
-                           firstMonthLoginRatio,
-                           quarterLoginNum,
-                           dateDiffStatsTable)
-
-# Eliminate "id" and "group" from features
-customer.ltv <- customer.ltv[,!(names(customer.ltv) %in% c("id","group"))] 
-
-# Observations with only cancelled customers
-customer.ltv.cancelled <- customer.ltv[customer.ltv$cancelled == 1,]
-customer.ltv.cancelled <- customer.ltv.cancelled[,!(names(customer.ltv.cancelled) %in% c("cancelled"))]
-
-# Eliminate those records with NA values
-customer.ltv[mapply(is.infinite, customer.ltv)] <- NA
-customer.ltv[mapply(is.nan, customer.ltv)] <- NA
-customer.ltv <- na.omit(customer.ltv)
-customer.ltv.cancelled[mapply(is.infinite, customer.ltv.cancelled)] <- NA
-customer.ltv.cancelled[mapply(is.nan, customer.ltv.cancelled)] <- NA
-customer.ltv.cancelled <- na.omit(customer.ltv.cancelled)
-
-# dimension of dataset
-# dim(customer.ltv)
-# dim(customer.ltv.cancelled)
-```
-
-```{r, cache=TRUE, warning=FALSE, fig.height = 5, fig.width = 8}
-# Problem 2: Develop a model for estimating the ltv of a customer. Characterize your model performance.
-
-# Entire Dataset
-# Split the whole data set into train (80%) and test (20%) set
-set.seed(42) # so that the split is reproducible
-all.ltv <- 1:nrow(customer.ltv)
-train.ltv <- sample(all.ltv, 0.8*nrow(customer.ltv))
-test.ltv <- all.ltv[-train.ltv]
-
-# Model 1: Linear regression with lasso
-ltv.x <- model.matrix(ltv~., customer.ltv[train.ltv,])[,-1]
+customer.met2.lasso.x <- model.matrix(lifespan~., customer.canceled.train)[,-1]
+customer.met2.lasso.test <- model.matrix(lifespan~., customer.continuing.test)[,-1]
 # 37 features
 # dim(ltv.x) 
-ltv.y <- customer.ltv[train.ltv,]$ltv
-ltv.lasso <- glmnet(ltv.x, ltv.y, alpha = 1)
-# Use MAE as error measure per professor's advice
-ltv.lasso.cv <- cv.glmnet(ltv.x, ltv.y, alpha = 1, type.measure = "mae") 
-plot(ltv.lasso.cv)
-ltv.lam.min = ltv.lasso.cv$lambda.min # lambda value chosen by min CV error
+customer.met2.lasso.y <- customer.canceled.train$lifespan
 
-ltv.lam.1se = ltv.lasso.cv$lambda.1se # lambda value chosen by 1se rule of CV error
-# coef(ltv.lasso, s=ltv.lam.1se)
+customer.met2.lasso.reg <- glmnet(customer.met2.lasso.x, customer.met2.lasso.y, alpha = 1)
+summary(customer.met2.lasso.reg)
+
+lambdas <- 10^seq(2, -3, by = -.1)
+
+# Setting alpha = 1 implements lasso regression
+customer.met2.lasso.cvreg <- cv.glmnet(customer.met2.lasso.x, customer.met2.lasso.y, alpha = 1, lambda = lambdas, standardize = TRUE, nfolds = 5)
+
+# Best 
+lambda_best <- customer.met2.lasso.cvreg$lambda.min 
+lambda_best
+
+predict(customer.met2.lasso.cvreg, newx=customer.met2.lasso.test, s = lambda_best, type="response")
 ```
-
-From the plot above, we choose optimal $\lambda$ = `r ltv.lam.1se` using 1-SE rule, and the optimal model selects `r ltv.lasso.cv$nzero[which(ltv.lasso.cv$lambda==ltv.lam.1se)]` variables. The variables and their coefficients are in below table:
 
 ```{r}
-coef.ltv.lasso.1se <- as.matrix(coef(ltv.lasso, s = ltv.lam.1se))
-coef.ltv.lasso.1se <- coef.ltv.lasso.1se[coef.ltv.lasso.1se != 0,]
-kable(coef.ltv.lasso.1se, digits = 3, col.names = "Coefficient")
+# linear model
 
-# Performance of Linear Regression with lasso on test set
-ltv.test.x <- model.matrix(ltv~., customer.ltv[test.ltv,])[,-1]
-ltv.lasso.pred <- predict(ltv.lasso, newx = ltv.test.x, s = ltv.lam.1se, type = "response")
-lasso.mae <- mean(abs(customer.ltv[test.ltv,"ltv"] - ltv.lasso.pred)) # MAE
 ```
 
-Then we test the model on test data, and the Mean Absolute Value is `r round(lasso.mae,2)`.
-
-##### **Model 2: Regression Tree**
-
-Trees are highly interpretable, thus we also try to fit the regression tree on the training dataset for this regression task. We choose the optimal tree size using cross-validation, and the CV error plot is as below:
-
-```{r, fig.height = 5, fig.width = 8}
-# Model 2: Decision tree
-
-# Fit a single tree using rpart
-ltv.tree <- rpart(ltv~., data = customer.ltv[train.ltv,])
-# Plot the CV error curve for the tree
-plotcp(ltv.tree)
-
-# Identify the value of the complexity parameter that produces the lowest CV error
-ltv.cp.min <- ltv.tree$cptable[which.min(ltv.tree$cptable[,"xerror"]),"CP"]
-ltv.cp.min.idx <- which.min(ltv.tree$cptable[,"xerror"])
-# CV-minimizing tree size
-# ltv.tree$cptable[ltv.cp.min.idx,"nsplit"] 
-
-# Prune the tree using the complexity parameter cp minimizing the CV error
-ltv.tree.prune.min <- prune(ltv.tree, cp = ltv.cp.min)
-ltv.party.prune.min <- as.party(ltv.tree.prune.min)
-# plot(ltv.party.prune.min, gp=gpar(fontsize=10))
-
-# Identify the value of the complexity parameter that produces the 1se CV error
-ltv.error.1se <- ltv.tree$cptable[ltv.cp.min.idx,"xerror"] + ltv.tree$cptable[ltv.cp.min.idx,"xstd"] 
-ltv.cp.vals <- ltv.tree$cptable[which(ltv.tree$cptable[,"xerror"] < ltv.error.1se), "CP"]
-ltv.cp.1se <- max(ltv.cp.vals)
-# CV-1se tree size
-# ltv.tree$cptable[ltv.tree$cptable[,"CP"]==ltv.cp.1se,"nsplit"]
-```
-
-From the plot above, we get optimal tree size = `r ltv.tree$cptable[ltv.tree$cptable[,"CP"]==ltv.cp.1se,"nsplit"]` using `1-SE rule`. We prune the tree using complexity parameter chosen by `1-SE rule`, and the optimal tree is as below:
-
-```{r, fig.height = 8, fig.width = 12}
-# Prune the tree using the complexity parameter cp using the 1se CV error
-ltv.tree.prune.1se <- prune(ltv.tree, cp = ltv.cp.1se) # Optimal tree
-ltv.party.prune.1se <- as.party(ltv.tree.prune.1se)
-plot(ltv.party.prune.1se, gp = gpar(fontsize = 10))
-
-# CV minimizing rule choose tree size 8
-# CV 1se rule choose the tree size 7
-# CV error for a single tree
-# printcp(ltv.tree)
-
-# Using 1se rule, the optimal tree size is 7
-
-# Performance of Regression Tree on test set
-ltv.tree.pred <- predict(ltv.tree.prune.1se, newdata = customer.ltv[test.ltv,])
-tree.mae <- mean(abs(customer.ltv[test.ltv,"ltv"] - ltv.tree.pred)) # MAE
-```
-
-Then we test the model on test data, and the Mean Absolute Value is `r round(tree.mae,2)`.
-
-##### **Model 3: Random Forests**
-
-We fit Random Forests on training data for this regression task, and get the importance of different variables as below:
-
-```{r, fig.height = 10, fig.width = 12}
-# Model 3: Random Forest
-ltv.rf <- randomForest(ltv~., data = customer.ltv[train.ltv,])
-varImpPlot(ltv.rf)
-
-# Performance of Random Forests on test set
-ltv.rf.pred <- predict(ltv.rf, newdata = customer.ltv[test.ltv,])
-rf.mae <- mean(abs(customer.ltv[test.ltv,"ltv"] - ltv.rf.pred)) # MAE
-```
-
-Then we test the model on test data, and the Mean Absolute Value is `r round(rf.mae,2)`.
-
-By comparing the test set performance of these 3 models, we identify that Random Forests perform the best. Below is the table comparing the Mean Absolute Error of 3 models, among which Random Forests generates the lowest Mean Absolute Error.
-
-| Model                            | Mean Absolute Error     | 
-|----------------------------------|-------------------------|
-| `Linear Regression with lasso`   | `r round(lasso.mae,2)`  |
-| `Classification Tree`            | `r round(tree.mae,2)`   |
-| `Random Forests`                 | `r round(rf.mae,2)`     | 
-
-Therefore, Random Forests performs best on predicting the life-time value for all customers.
+## 2.	Develop a model for estimating the ltv of a customer. Characterize your model performance.
 
 ```{r}
-# Observations with only cancelled customers
-# Split the whole data set into train (80%) and test (20%) set
-set.seed(42) # so that the split is reproducible
-all.ltv.cancelled <- 1:nrow(customer.ltv.cancelled)
-train.ltv.cancelled <- sample(all.ltv.cancelled, 0.8*nrow(customer.ltv.cancelled))
-test.ltv.cancelled <- all.ltv.cancelled[-train.ltv.cancelled]
 ```
 
-##### **Customers Who Have Already Cancelled Their Accounts**
+## 3.	Develop a customer segmentation scheme. Include in this scheme the identification of sleeping customers, those that are no longer active but have not canceled their account.
 
-There are `r format(nrow(customer.ltv.cancelled), big.mark=",")` customers who have already cancelled their accounts. We use exactly the same three models as we do for all customers.
+# Segmentation 1: Segmentation 1: Regular(users who have completed regularly irrespective of holidays), Sleeping, Holiday User(holiday based customers),  Inactive (canceled)
 
-##### **Model 1: Linear Regression with lasso**
+- Variables: Completed, pages, onsite, entered
+- Classification label: Regular/Sleeping/Inactive
+  - 3: if the customer has browsed the website >60 days of `12/31/2014` then classify the customer as sleeping.
+  - 2: if all the variables of related to that customer is 0 then we classfy the customer as a inactive.
+  - 1: if the customer has recently browsed the website has been active within 60 days of `12/31/2014` then classify the customer as active.
 
-We choose the $\lambda$ value for lasso using cross-validation, and the CV error plot is as below:
-
-```{r, cache=TRUE, fig.height = 5, fig.width = 8}
-# Model 1: Linear regression with lasso
-ltv.cancelled.x <- model.matrix(ltv~., customer.ltv.cancelled[train.ltv.cancelled,])[,-1]
-# 36 features
-# dim(ltv.cancelled.x) 
-ltv.cancelled.y <- customer.ltv.cancelled[train.ltv.cancelled,]$ltv
-ltv.cancelled.lasso <- glmnet(ltv.cancelled.x, ltv.cancelled.y, alpha = 1)
-ltv.cancelled.lasso.cv <- cv.glmnet(ltv.cancelled.x, ltv.cancelled.y, alpha = 1, type.measure = "mae")
-plot(ltv.cancelled.lasso.cv)
-ltv.cancelled.lam.min = ltv.cancelled.lasso.cv$lambda.min # lambda value chosen by min CV error
-# ltv.cancelled.lasso.cv$nzero[which(ltv.cancelled.lasso.cv$lambda==ltv.cancelled.lam.min)]
-# coef(ltv.cancelled.lasso, s=ltv.cancelled.lam.min)
-
-ltv.cancelled.lam.1se = ltv.cancelled.lasso.cv$lambda.1se # lambda value chosen by 1se rule of CV error
-# ltv.cancelled.lasso.cv$nzero[which(ltv.cancelled.lasso.cv$lambda==ltv.cancelled.lam.1se)]
-# coef(ltv.cancelled.lasso, s=ltv.cancelled.lam.1se)
+- data preprocssing:
+```{r}
+aggregatedCustomerSums$holiday.ratio <- aggregatedCustomerSums$holiday/aggregatedCustomerSums$completed
+summary(aggregatedCustomerSums$holiday.ratio)
+```
+```{r}
+aggregatedCustomerSums$holiday.user <- ifelse(aggregatedCustomerSums$holiday.ratio>0.4573,1,0)
 ```
 
-From the plot above, we choose optimal $\lambda$ = `r ltv.cancelled.lam.1se` using 1-SE rule, and the optimal model selects `r ltv.cancelled.lasso.cv$nzero[which(ltv.cancelled.lasso.cv$lambda==ltv.cancelled.lam.1se)]` variables. The variables and their coefficients are in below table:
+active = 1
+Sleeping = 2
+Inactive (canceled) = 3
+```{r}
+width = length(customer.data)
+len = length(customer.data$id)
+user.type = rep(0, times = len)
+previd = customer.data[1][1]
+startid = previd
+for(i in seq(len)){
+  startid = customer.data[i,1]
+  if(customer.data[i,2] == 2){
+    user.type[i] = 3
+  }else if(startid!=previd){
+    diff = (as.Date('12/31/2014','%m/%d/%Y') - customer.data[i-1,4])
+    if(diff>60){
+      user.type[i-1] = 2
+      user.type[i] = 1
+    }else{
+      user.type[i] = 1
+    }
+  }else{
+    user.type[i] = 1
+  }
+  previd = startid
+}
+customer.data$userType <- user.type
+```
+
 
 ```{r}
-coef.ltv.cancelled.lasso.1se <- as.matrix(coef(ltv.cancelled.lasso, s = ltv.cancelled.lam.1se))
-coef.ltv.cancelled.lasso.1se <- coef.ltv.cancelled.lasso.1se[coef.ltv.cancelled.lasso.1se != 0,]
-kable(coef.ltv.cancelled.lasso.1se, digits = 3, col.names = "Coefficient")
-
-# Performance of Linear Regression with lasso on test set
-ltv.cancelled.test.x <- model.matrix(ltv~., customer.ltv.cancelled[test.ltv.cancelled,])[,-1]
-ltv.cancelled.lasso.pred <- predict(ltv.cancelled.lasso, newx=ltv.cancelled.test.x, s = ltv.cancelled.lam.1se, type = "response")
-cancelled.lasso.mae <- mean(abs(customer.ltv.cancelled[test.ltv.cancelled,"ltv"] - ltv.cancelled.lasso.pred)) # MAE
+#select the data we need
+#customer.data.segOne <- customer.data %>% group_by(id) %>% filter(date == max(date)) 
+customer.data.segOne <- subset(customer.data,select = c('pages','onsite', 'userType'))#, 'entered', 'completed'))
+#split into training and test dataset
+customer.data.segOne <- transform(
+  customer.data.segOne,
+  pages=as.integer(pages),
+  onsite=as.integer(onsite),
+  userType = as.factor(userType)
+)
+dt = sort(sample(nrow(customer.data.segOne), nrow(customer.data.segOne)*.7))
+train.segOne<-customer.data.segOne[dt,]
+test.segOne<-customer.data.segOne[-dt,]
 ```
 
-Then we test the model on test data, and the Mean Absolute Value is `r round(cancelled.lasso.mae,2)`.
-
-##### **Model 2: Regression Tree**
-
-We also try to fit the regression tree on the training dataset for customers who have cancelled their accounts. We choose the optimal tree size using cross-validation, and the CV error plot is as below:
-
-```{r, fig.height = 5, fig.width = 8}
-# Model 2: Regression tree
-
-# Fit a single tree using rpart
-ltv.cancelled.tree <- rpart(ltv~., data = customer.ltv.cancelled[train.ltv.cancelled,])
-# Plot the CV error curve for the tree
-plotcp(ltv.cancelled.tree)
-
-# Identify the value of the complexity parameter that produces the lowest CV error
-ltv.cancelled.cp.min <- ltv.cancelled.tree$cptable[which.min(ltv.cancelled.tree$cptable[,"xerror"]),"CP"]
-ltv.cancelled.cp.min.idx <- which.min(ltv.cancelled.tree$cptable[,"xerror"])
-# ltv.cancelled.tree$cptable[ltv.cancelled.cp.min.idx,"nsplit"] # CV-minimizing tree size
-
-# Prune the tree using the complexity parameter cp minimizing the CV error
-ltv.cancelled.tree.prune.min <- prune(ltv.cancelled.tree, cp = ltv.cancelled.cp.min)
-ltv.cancelled.party.prune.min <- as.party(ltv.cancelled.tree.prune.min)
-# plot(ltv.cancelled.party.prune.min, gp=gpar(fontsize=10))
-
-# Identify the value of the complexity parameter that produces the 1se CV error
-ltv.cancelled.error.1se <- ltv.cancelled.tree$cptable[ltv.cancelled.cp.min.idx,"xerror"] + 
-                           ltv.cancelled.tree$cptable[ltv.cancelled.cp.min.idx,"xstd"] 
-ltv.cancelled.cp.vals <- ltv.cancelled.tree$cptable[which(ltv.cancelled.tree$cptable[,"xerror"] < 
-                                                          ltv.cancelled.error.1se), "CP"]
-ltv.cancelled.cp.1se <- max(ltv.cancelled.cp.vals)
-# ltv.cancelled.tree$cptable[ltv.cancelled.tree$cptable[,"CP"]==ltv.cancelled.cp.1se,"nsplit"] # CV-1se tree size
+#random forest
+```{r}
+set.seed(42)
+customer.segOne.rf <- ranger(
+  as.factor(userType) ~ ., 
+  data = train.segOne, 
+  importance = "impurity",
+  num.trees = 2000
+)
+customer.segOne.pred <- predict(customer.segOne.rf, test.segOne)
+customer.segOne.rfResult<- table(test.segOne$userType, predictions(customer.segOne.pred))
+customer.segOne.rfResult
+accuracy<- sum(diag(customer.segOne.rfResult)) / sum(customer.segOne.rfResult)
+accuracy
 ```
 
-From the plot above, we get optimal tree size = `r ltv.cancelled.tree$cptable[ltv.cancelled.tree$cptable[,"CP"]==ltv.cancelled.cp.1se,"nsplit"]` using `1-SE rule`. We prune the tree using complexity parameter chosen by `1-SE rule`, and the optimal tree is as below:
-
-```{r, fig.height = 8, fig.width = 12}
-# Prune the tree using the complexity parameter cp using the 1se CV error
-ltv.cancelled.tree.prune.1se <- prune(ltv.cancelled.tree, cp = ltv.cancelled.cp.1se) # Optimal tree
-ltv.cancelled.party.prune.1se <- as.party(ltv.cancelled.tree.prune.1se)
-plot(ltv.cancelled.party.prune.1se, gp = gpar(fontsize = 10))
-
-# CV minimizing rule and CV 1se rule both choose tree size 8
-# CV error for a single tree
-# printcp(ltv.cancelled.tree)
-
-# Using 1se rule, the optimal tree size is 8
-# Performance of Regression Tree on test set
-ltv.cancelled.tree.pred <- predict(ltv.cancelled.tree.prune.1se, newdata = customer.ltv.cancelled[test.ltv.cancelled,])
-cancelled.tree.mae <- mean(abs(customer.ltv.cancelled[test.ltv.cancelled,"ltv"] - ltv.cancelled.tree.pred)) # MAE
-```
-
-Then we test the model on test data, and the Mean Absolute Value is `r round(cancelled.tree.mae,2)`.
-
-##### **Model 3: Random Forests**
-
-We fit Random Forests on training data for customers who have cancelled their accounts, and get the importance of different variables as below:
-
-```{r, cache=TRUE, fig.height = 10, fig.width = 12}
-# Model 3: Random Forests
-ltv.cancelled.rf <- randomForest(ltv~., data = customer.ltv.cancelled[train.ltv.cancelled,])
-varImpPlot(ltv.cancelled.rf)
-
-# Performance of Random Forests on test set
-ltv.cancelled.rf.pred <- predict(ltv.cancelled.rf, newdata = customer.ltv.cancelled[test.ltv.cancelled,])
-cancelled.rf.mae <- mean(abs(customer.ltv.cancelled[test.ltv.cancelled,"ltv"] - ltv.cancelled.rf.pred)) # MSE
-```
-
-Then we test the model on test data, and the Mean Absolute Value is `r round(cancelled.rf.mae,2)`.
-
-By comparing the test set performance of these 3 models, we identify that Random Forests perform the best. Below is the table comparing the Mean Absolute Error of 3 models, among which Random Forests generates the lowest Mean Absolute Error.
-
-| Model                            | Mean Absolute Error               | 
-|----------------------------------|-----------------------------------|
-| `Linear Regression with lasso`   | `r round(cancelled.lasso.mae,2)`  |
-| `Classification Tree`            | `r round(cancelled.tree.mae,2)`   |
-| `Random Forests`                 | `r round(cancelled.rf.mae,2)`     | 
-
-Therefore, Random Forests performs best on predicting the life-time value for customers who have already cancelled their accounts as well. We can see that the Mean Absolute Error gets further reduced for customers who have already cancelled than all customers. Customers who have not cancelled but registered at a late time can have a very short life-time value per our calculation, thus eliminating them may make the prediction task easier and the Mean Absolute Error is even lower. Random Forests give us impressively low error in this task, which means that our client could use this approach to predict the life-time value of their future users and make forecast of their revenues more accurately.
-
-
-##### **Problem 3: How to segment customers so that we can identify sleeping customers?**
-
-In the third problem, we need to develop a customer segmentation scheme which can help our client identify those sleeping customers, who are no longer active but have not cancelled their account yet. This is an unsupervised learning task because there is no labels for this problem. So, clustering is a great method to shed light on this problem [Reference 7].  
-
-Before we cluster the customers, we first explore the data. After plotting the number of days between the last login date and 12-31-2014, the end date of this dataset, which is used as the last day of relationship with this company for customers who have not cancelled their accounts, we think 15 days could be a reasonable cutoff for deciding whether a customer is sleeping or not. If a customer has not logged in for more than 15 days, we will identify him/her as a sleeping customer. 
-
-```{r, cache=TRUE, warning=FALSE}
-
-# Problem 3 dataset
-
-# Merge all the data
-customer.all <- data.frame(ltv,
-                           stat_features,
-                           firstMonthLoginNum,
-                           lastMonthLoginNum,
-                           firstMonthLoginRatio,
-                           quarterLoginNum,
-                           dateDiffStatsTable)
-
-# Find out the last login date for customers who have not cancelled the subsription yet
-lastLoginDate <- ddply(data.ltv[data.ltv$status != 0,], .(id), summarise,
-                       lastLoginDate = max(as.Date(date)))
-customer.all <- merge(customer.all, lastLoginDate)
-customer.not.cancelled <- customer.all[customer.all$cancelled == 0, ]
-# eliminate "cancelled" and "group"
-customer.not.cancelled <- customer.not.cancelled[,!(names(customer.not.cancelled) %in% c("cancelled","group"))] 
-sleepDays <- as.numeric(difftime(as.Date("2014-12-31"), customer.not.cancelled$lastLoginDate, units = "days"))
-plot(sleepDays, ylim = c(0,50))
-axis(2, yaxp = c(0,50,10))
-abline(h = 15, col = "red")
-
-# Based on the plot, we choose 15 days as the cutoff for deciding whether a customer is sleeping or not
-# Then we create the class label for sleeping
-sleep <- factor(ifelse(sleepDays <= 15, 0, 1), levels = c(0,1))
-customer.not.cancelled <- data.frame(sleep, customer.not.cancelled)
-```
-
-We have `r nrow(customer.not.cancelled)` customers who have not cancelled their accounts, among whom `r sum(sleep==1)` are identified as sleeping customers.
-
-To determine the important features to be used in clustering the sleeping customers, we first fit Random Forests to the dataset as a classification task, and use the importance of variables ranked by Random Forests to identify crucial features that can tell us whether a customer is sleeping or not. The importance of features are as below:
-
-```{r, cache=TRUE, fig.height=10, fig.width=12}
-# Problem 3: Develop a customer segmentation scheme. Include in this scheme the identification of sleeping customers, those that are no longer active but have not canceled their account.
-
-# Step 1: fit a Random Forest on the entire data and find those important features
-# eliminate "id", "lastLoginDate" and "avgDateDiff" for classification
-customer.not.cancelled.noNA <- customer.not.cancelled[,!(names(customer.not.cancelled) %in% c("id","lastLoginDate","avgDateDiff"))] 
-# Below 3 lines of code are to eliminate the NA, NAN and infinate values from data, and are applied to every dataset used in model fitting afterwards, these codes are with reference to Reference 3
-customer.not.cancelled.noNA[mapply(is.infinite, customer.not.cancelled.noNA)] <- NA
-customer.not.cancelled.noNA[mapply(is.nan, customer.not.cancelled.noNA)] <- NA
-customer.not.cancelled.noNA <- na.omit(customer.not.cancelled.noNA)
-customer.not.cancelled.rf <- randomForest(sleep~., data = customer.not.cancelled.noNA)
-varImpPlot(customer.not.cancelled.rf)
-# importance(customer.not.cancelled.rf)[order(-customer.not.cancelled.rf$importance),]
-```
-
-From the importance rank shown above, we choose oneMonthLoginRatio, lastMonthLoginNum, sdDateDiff, avgDateDiff, maxDateDiff and ltv (customer life-time value calculated in Problem 2) as highly relevant features to use in clustering. Then we also conduct a feature cluster and see whether there are other features that are highly correlated with the number of days each customer is sleeping.
-
-```{r, cache=TRUE, fig.height=10, fig.width=12}
-# Then we do a feature cluster and see what features are highly correlated with sleepDays
-customer.not.cancelled.features <- data.frame(customer.not.cancelled, sleepDays)
-# eliminate "sleep", "id", "gender" and "lastLoginDate"
-customer.not.cancelled.features <- customer.not.cancelled.features[,!(names(customer.not.cancelled) %in% c("id","lastLoginDate","gender"))] 
-customer.not.cancelled.features <- customer.not.cancelled.features[,-1]
-customer.not.cancelled.features[mapply(is.infinite, customer.not.cancelled.features)] <- NA
-customer.not.cancelled.features[mapply(is.nan, customer.not.cancelled.features)] <- NA
-customer.not.cancelled.features <- na.omit(customer.not.cancelled.features)
-feature.matrix <- as.matrix(customer.not.cancelled.features)
-feature.cor <- cor(feature.matrix)
-feature.dissimilarity <- 1 - abs(feature.cor)
-feature.distance <- as.dist(feature.dissimilarity)
-feature.hc.complete <- hclust(feature.distance, method = "complete")
-plot(feature.hc.complete, main = "Feature Cluster", xlab = "", sub = "", cex = .9)
-abline(h= 0.4, col = "red")
-```
-
-From the dendrogram above, we plot a horizontal red line at correlation=0.6, and we find that customers' sleeping days is not really correlated with other features. Finally, we cluster the customers with lastMonthLoginNum, oneMonthLoginRatio, avgDateDiff, sdDateDiff, maxDateDiff, ltv, and sleepDays using Hierarchical Clustering. We scale all the features used in clustering. We are inspired by Tal Galili [Reference 2] who developed a hierarchical cluster analysis on Iris Dataset and develop below heatmap for clustering:
+# Logistic Regression
 
 ```{r}
-customer.not.cancelled.cluster <- scale(customer.not.cancelled.features[,c("lastMonthLoginNum","firstMonthLoginRatio","avgDateDiff","sdDateDiff","maxDateDiff","ltv","sleepDays")])
-customer.not.cancelled.dist <- dist(customer.not.cancelled.cluster)
-customer.not.cancelled.hc <- hclust(customer.not.cancelled.dist, method = "complete")
-customer.cluster <- cutree(customer.not.cancelled.hc, k = 8)
-# table(customer.cluster, customer.not.cancelled.noNA$sleep)
-
-isSleep <- rev(levels(customer.not.cancelled.noNA$sleep))
-dend <- as.dendrogram(customer.not.cancelled.hc)
-dend <- rotate(dend, 1:nrow(customer.not.cancelled.cluster))
-dend <- color_branches(dend, k = 8)
-# Manually match the labels, as much as possible, to the real classification of the customers:
-labels_colors(dend) <-
-   rainbow_hcl(8)[sort_levels_values(
-      as.numeric(customer.not.cancelled.noNA$sleep)[order.dendrogram(dend)]
-   )]
-# We shall add the flower type to the labels:
-labels(dend) <- paste(as.character(customer.not.cancelled.noNA$sleep)[order.dendrogram(dend)],
-                           "(",labels(dend),")",
-                           sep = "")
-# We hang the dendrogram a bit:
-dend <- hang.dendrogram(dend,hang_height = 0.1)
-# reduce the size of the labels:
-# dend <- assign_values_to_leaves_nodePar(dend, 0.5, "lab.cex")
-dend <- set(dend, "labels_cex", 0.5)
-# And plot:
-#par(mar = c(3,3,3,7))
-# plot(dend,
-#      main = "Clustered Customers
-#      (the labels give the true customer sleep label)",
-#      horiz =  TRUE,  nodePar = list(cex = .007))
-# legend("topleft", legend = isSleep, fill = rainbow_hcl(8))
-
-some_col_func <- function(n) rev(colorspace::heat_hcl(n, c = c(80, 30), l = c(30, 90), power = c(1/5, 1.5)))
-
-# scaled_iris2 <- iris2 %>% as.matrix %>% scale
-
-gplots::heatmap.2(as.matrix(customer.not.cancelled.cluster),
-          main = "Heatmap for Customer Segmentation",
-          srtCol = 20,
-          dendrogram = "row",
-          Rowv = dend,
-          Colv = "NA", # this to make sure the columns are not ordered
-          trace = "none",
-          margins = c(5,0.1),
-          key.xlab = "Cm",
-          denscol = "grey",
-          density.info = "density",
-          RowSideColors = rev(labels_colors(dend)), # to add nice colored strips
-          col = some_col_func
-         )
+#create the logistic regression model with output as userType and inputs as pages, onsite, entered and completed.
+customer.segOne.lr <- multinom(train.segOne$userType ~ . , data = train.segOne)
+customer.segOne.lr
+#test the model classification on the test data
+customer.segOne.lr.pred <- predict(customer.segOne.lr,newdata=test.segOne)
+#create a confusion matrix
+customer.segOne.lr.conf <-table(customer.segOne.lr.pred, test.segOne$userType)
+prop.table(customer.segOne.lr.conf)
+#determine the accuracy of the model
+customer.segOne.lr.accuracy<- sum(diag(customer.segOne.lr.conf)) / sum(customer.segOne.lr.conf)
+customer.segOne.lr.accuracy
 ```
 
-From the heatmap, we can tell that customers with large avgDateDiff, sdDateDiff, maxDateDiff, and sleeping days, while low lastMonthLoginNum and oneMonthLoginRatio are clustered together in the cluster marked in blue. This result aligns with our understanding of customers: customers with low activity - which can be indicated by large date difference between logins and low last month login times compared to their login times in the first month, are highly likely to sleep. Therefore, our choices of features in clustering are actually associated with the sleeping status of a customer.
+# Naive Bayes
+
+```{r}
+#Construct a naive bayes classification model on the train data set
+customer.segOne.nb <-naiveBayes(train.segOne$userType ~ ., data = train.segOne)
+customer.segOne.nb
+#test the model classification on the test data
+customer.segOne.nb.pred <- predict(customer.segOne.nb, newdata=test.segOne)
+#create a confusion matrix
+customer.segOne.nb.conf <-table(customer.segOne.nb.pred, test.segOne$userType)
+prop.table(customer.segOne.nb.conf)
+#determine the accuracy of the model
+customer.segOne.nb.accuracy<- sum(diag(customer.segOne.nb.conf)) / sum(customer.segOne.nb.conf)
+customer.segOne.nb.accuracy
+```
+
+=======
+
+#test the model classification on the test data
+customer.segOne.nb.pred <- predict(customer.segOne.nb, newdata=test.segOne)
+
+#create a confusion matrix
+customer.segOne.nb.conf <-table(customer.segOne.nb.pred, test.segOne$userType)
+prop.table(customer.segOne.nb.conf)
+
+#determine the accuracy of the model
+customer.segOne.nb.accuracy<- sum(diag(customer.segOne.nb.conf)) / sum(customer.segOne.nb.conf)
+customer.segOne.nb.accuracy
+
+>>>>>>> 0dd6f9099c5315c95a1fd5e0a66e27ff9e8f8614
+- Segmentation 2: Decisive customers, Tentative customers, Hesitant customers
+- Variables: Gender, onsite, pages, entered, completed
+- Classification label: completed / entered 
+  - 2: if the `decisiveratio` of that customer is greater or equal to `r summary(aggregatedCustomerSums$decisiveratio)[5]` then we classfy the customer as decisive
+  - 1: if the `decisiveratio` of that customer fall in the range of `r summary(aggregatedCustomerSums$decisiveratio)[2]` and `r summary(aggregatedCustomerSums$decisiveratio)[5]`, then we classfy the customer as tentative
+  - 0: if the `decisiveratio` of that customer is smaller than `r summary(aggregatedCustomerSums$decisiveratio)[2]` , then we classfy the customer as hesitant
+
+```{r}
+summary(aggregatedCustomerSums$decisiveratio)
+```
 
 
+```{r}
+# create data labels 
+decisivelabel <- with(aggregatedCustomerSums, ifelse(decisiveratio >= summary(aggregatedCustomerSums$decisiveratio)[5], 2, ifelse(decisiveratio >= summary(aggregatedCustomerSums$decisiveratio)[2],1,0)))
+# merge the created label with selected data
+decisive.data <- data.frame(aggregatedCustomerSums[c("pages", "onsite","holiday","gender","lifespan")], decisivelabel = as.factor(decisivelabel))
+set.seed(42)
+# separate data into train, test data
+#randomly get 2/3 data of each label into train data, 1/3 data of each label into test data
+hesitant<-subset(decisive.data, decisivelabel == 0)
+tentative<-subset(decisive.data, decisivelabel == 1)
+decisive<-subset(decisive.data, decisivelabel == 2)
+train.h<-hesitant[sample(nrow(hesitant),), ][c(1:1658), ]
+test.h<-hesitant[sample(nrow(hesitant),), ][c(1659:2487), ]
+train.t<-tentative[sample(nrow(tentative),), ][c(1:3155),]
+test.t<-tentative[sample(nrow(tentative),), ][c(3156:4732),]
+train.d<-decisive[sample(nrow(decisive),), ][c(1:1854),]
+test.d<-decisive[sample(nrow(decisive),), ][c(1854:2781),]
+decisive.train<-rbind(train.h, train.t, train.d)
+decisive.test<-rbind(test.h, test.t, test.d)
+```
+
+```{r, cache = TRUE}
+# Random Forest
+# build the random forest model for classification
+customer.rf <- randomForest(decisivelabel~., data=decisive.train, ntree=500, proximity=T)
+customer.rf
+customer.rf.predict <- predict(customer.rf, decisive.test)
+customer.rf.table <- table(customer.rf.predict, decisive.test$decisivelabel)
+customer.rf.table
+# calculate the accuracy of our random forest model
+customer.rf.misclassificationrate = mean(customer.rf.predict != decisive.test$decisivelabel)
+customer.rf.accuracy <- 1- customer.rf.misclassificationrate
+customer.rf.accuracy
+```
 
 
+```{r}
+# KNN
+train_control <- trainControl(method = "cv", number = 10)
+customer.knn <- train(decisivelabel~., data = decisive.train, trControl = train_control, method = "knn")
+customer.knn
+customer.knn.predict <- predict(customer.knn, decisive.test)
+customer.knn.table <- table(customer.knn.predict, decisive.test$decisivelabel)
+customer.knn.table
+# calculate the accuracy of our random forest model
+customer.knn.misclassificationrate = mean(customer.knn.predict != decisive.test$decisivelabel)
+customer.knn.accuracy <- 1- customer.knn.misclassificationrate
+customer.knn.accuracy
+```
 
+```{r}
+# Mulrinomial Logistic Regression
+decisve.ml <- multinom(decisivelabel ~ . , data = decisive.train)
+decisve.ml
+logit.pred <- decisve.ml %>% predict(decisive.test)
+conf.mat.logit<-table(logit.pred, decisive.test$decisivelabel)
+conf.mat.logit
+logit.accuracy<- sum(diag(conf.mat.logit)) / sum(conf.mat.logit)
+logit.accuracy
+```
 
+```{r}
+# Naive Bayes
+decisive.nb <-naiveBayes(decisivelabel ~ . , data = decisive.train, laplace=1)
+decisive.nb.pred <- predict(decisive.nb, decisive.test)
+conf.mat.nb<-table(decisive.nb.pred, decisive.test$decisivelabel)
+conf.mat.nb
+nb.accuracy<- sum(diag(conf.mat.nb)) / sum(conf.mat.nb)
+nb.accuracy
+```
 
+```{r}
+#SVM
+decisive.svm <-svm(decisivelabel ~ . , data = decisive.train, type = 'C-classification', kernel = 'radial')
+decisive.svm.pred <- predict(decisive.svm, decisive.test)
+conf.mat.svm<-table(decisive.svm.pred, decisive.test$decisivelabel)
+conf.mat.svm
+svm.accuracy<- sum(diag(conf.mat.svm)) / sum(conf.mat.svm)
+svm.accuracy
+```
 
-
-
+## Random forest is the best
